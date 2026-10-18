@@ -34,6 +34,10 @@ PAYLOAD = frozenset((
 ))
 
 
+class ReleaseError(RuntimeError):
+    """A locally generated release failure safe to show without exception causes."""
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -48,11 +52,11 @@ class GitHub:
         parsed = urllib.parse.urlsplit(url)
         trusted_api = url.startswith(API + "/") or url.startswith(UPLOAD + "/")
         if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443) or parsed.fragment:
-            raise RuntimeError("untrusted release endpoint")
+            raise ReleaseError("untrusted release endpoint")
         if authenticated and not trusted_api:
-            raise RuntimeError("refusing authentication outside the fixed release API")
+            raise ReleaseError("refusing authentication outside the fixed release API")
         if not trusted_api and parsed.hostname not in ASSET_HOSTS:
-            raise RuntimeError("untrusted asset storage endpoint")
+            raise ReleaseError("untrusted asset storage endpoint")
         headers = {"Accept": "application/octet-stream" if binary else "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
         if authenticated:
             headers["Authorization"] = "Bearer " + self.token
@@ -71,7 +75,7 @@ class GitHub:
             error.close()
             if missing:
                 return None
-            raise RuntimeError("release API request failed") from None
+            raise ReleaseError("release API request failed") from None
 
     def upload(self, release_id, name, data):
         url = UPLOAD + "/releases/" + identifier(release_id) + "/assets?name=" + urllib.parse.quote(name, safe="")
@@ -86,19 +90,19 @@ class GitHub:
             location = error.headers.get("Location", "")
             error.close()
             if not redirected:
-                raise RuntimeError("release asset download failed") from None
+                raise ReleaseError("release asset download failed") from None
             # Signed storage redirects are fetched without the GitHub token.
             response = self.request(location, binary=True, authenticated=False)
         with response:
             value = response.read(size + 1)
         if len(value) != size:
-            raise RuntimeError("release asset size differs")
+            raise ReleaseError("release asset size differs")
         return value
 
 
 def identifier(value):
     if type(value) is not int or value < 1:
-        raise RuntimeError("invalid release resource identifier")
+        raise ReleaseError("invalid release resource identifier")
     return str(value)
 
 
@@ -107,13 +111,13 @@ def find_release(client, tag):
     for page in range(1, 101):
         releases = client.api("/releases?per_page=100&page=" + str(page))
         if not isinstance(releases, list):
-            raise RuntimeError("invalid release listing")
+            raise ReleaseError("invalid release listing")
         matches.extend(item for item in releases if item.get("tag_name") == tag)
         if len(matches) > 1:
-            raise RuntimeError("duplicate release tags conflict")
+            raise ReleaseError("duplicate release tags conflict")
         if len(releases) < 100:
             return matches[0] if matches else None
-    raise RuntimeError("release listing exceeded the verified limit")
+    raise ReleaseError("release listing exceeded the verified limit")
 
 
 def retain(client, files, tag, commit, body):
@@ -123,30 +127,33 @@ def retain(client, files, tag, commit, body):
     release = find_release(client, tag)
     if reference is not None:
         obj = reference.get("object", {})
-        if obj.get("type") != "commit" or obj.get("sha") != commit:
-            raise RuntimeError("existing release tag conflicts")
-    expected = {"tag_name": tag, "target_commitish": commit, "name": "Coder " + tag + " build records", "body": body, "prerelease": False}
+        if obj.get("type") != "commit" or not re.fullmatch(r"[0-9a-f]{40}", obj.get("sha", "")):
+            raise ReleaseError("existing release tag conflicts")
+        if release is None and obj["sha"] != commit:
+            raise ReleaseError("bare release tag is not bound to the current verified commit")
+    tag_commit = reference["object"]["sha"] if reference is not None else commit
+    expected = {"tag_name": tag, "name": "Coder " + tag + " build records", "body": body, "prerelease": False}
     if release is not None and any(release.get(key) != value for key, value in expected.items()):
-        raise RuntimeError("existing release metadata conflicts")
+        raise ReleaseError("existing release metadata conflicts")
     if release is not None and reference is None:
-        raise RuntimeError("existing release tag is unavailable")
+        raise ReleaseError("existing release tag is unavailable")
     if reference is None:
         client.api("/git/refs", "POST", {"ref": "refs/tags/" + tag, "sha": commit})
     if release is None:
-        release = client.api("/releases", "POST", {**expected, "draft": True, "make_latest": "false"})
+        release = client.api("/releases", "POST", {**expected, "target_commitish": tag_commit, "draft": True, "make_latest": "false"})
     release_id = identifier(release["id"])
 
     def verify_assets(complete, public=False):
         assets = client.api("/releases/" + release_id + "/assets?per_page=100")
         names = [asset.get("name") for asset in assets]
         if len(names) != len(set(names)) or not set(names).issubset(files) or (complete and set(names) != set(files)):
-            raise RuntimeError("release asset names conflict")
+            raise ReleaseError("release asset names conflict")
         for asset in assets:
             data = files[asset["name"]]
             if asset.get("state") != "uploaded" or asset.get("size") != len(data):
-                raise RuntimeError("release asset metadata conflicts")
+                raise ReleaseError("release asset metadata conflicts")
             if client.download(asset["id"], len(data), authenticated=not public) != data:
-                raise RuntimeError("release asset checksum differs")
+                raise ReleaseError("release asset checksum differs")
         return set(names)
 
     present = verify_assets(complete=not release["draft"])
@@ -157,11 +164,25 @@ def retain(client, files, tag, commit, body):
         client.api("/releases/" + release_id, "PATCH", {"draft": False, "make_latest": "false"})
     published = client.api("/releases/" + release_id)
     if published.get("id") != release["id"] or published.get("draft") is not False or any(published.get(key) != value for key, value in expected.items()):
-        raise RuntimeError("published release metadata differs")
+        raise ReleaseError("published release metadata differs")
     final_ref = client.api("/git/ref/tags/" + tag)
-    if final_ref.get("object", {}).get("sha") != commit or final_ref.get("object", {}).get("type") != "commit":
-        raise RuntimeError("published release tag differs")
+    if final_ref.get("object", {}).get("sha") != tag_commit or final_ref.get("object", {}).get("type") != "commit":
+        raise ReleaseError("published release tag differs")
     verify_assets(complete=True, public=True)
+    return tag_commit
+
+
+def release_body(files, actual):
+    payload = {name: hashlib.sha256(data).hexdigest() for name, data in sorted(files.items())}
+    identity = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return (
+        "Qualified Linux amd64 Coder CLI build records. Registry publication is confirmed only by digest readback and its separate workflow receipt.\n\n"
+        + "Payload SHA256: " + identity + "\n"
+        + "SHA256SUMS SHA256: " + hashlib.sha256(files["SHA256SUMS"]).hexdigest() + "\n"
+        + "Registry index: " + actual["registry_index_digest"] + "\nPlatform manifest: " + actual["platform_manifest_digest"] + "\n"
+        + "\n".join(repository + ":" + publisher.PUBLICATION["tag"] for repository in publisher.PUBLICATION["repositories"])
+        + "\n\nUse sources.tar.gz for the exact patched source and license notices, and recipe.tar.gz for the build recipe. The generated GitHub source archive contains the original integration wrapper. Retry run and commit provenance is retained in workflow receipts; an existing release tag is never moved.\n"
+    )
 
 
 def main():
@@ -172,37 +193,30 @@ def main():
     parser.add_argument("--approved-manifest", required=True)
     args = parser.parse_args()
     if os.environ.get("GITHUB_SERVER_URL") != "https://github.com" or os.environ.get("GITHUB_REPOSITORY") != "treyturner/coder" or os.environ.get("GITHUB_REF") != "refs/heads/main":
-        raise RuntimeError("release delivery requires the intended GitHub main branch")
+        raise ReleaseError("release delivery requires the intended GitHub main branch")
     work = args.work.resolve()
     output = work / "dist"
     actual = publisher.approved(output, args.approved_index, args.approved_manifest)
     run = source_run.verified_run(args.verification_run_id)
     commit = run.get("head_sha", "")
     if not re.fullmatch(r"[0-9a-f]{40}", commit) or run.get("head_branch") != "main" or commit != os.environ.get("GITHUB_SHA"):
-        raise RuntimeError("release delivery requires verification of the current main commit")
+        raise ReleaseError("release delivery requires verification of the current main commit")
     files = {path.name: path.read_bytes() for path in output.iterdir() if path.is_file()}
     if set(files) != PAYLOAD:
-        raise RuntimeError("qualified release payload names differ")
+        raise ReleaseError("qualified release payload names differ")
     tag = "proxy-patch-" + publisher.PUBLICATION["tag"]
-    body = (
-        "Qualified Linux amd64 Coder CLI build records. Registry publication is confirmed only by digest readback and its separate workflow receipt.\n\n"
-        + "Verification run: " + args.verification_run_id + "\nSource integration commit: " + commit + "\n"
-        + "SHA256SUMS SHA256: " + hashlib.sha256(files["SHA256SUMS"]).hexdigest() + "\n"
-        + "Registry index: " + actual["registry_index_digest"] + "\nPlatform manifest: " + actual["platform_manifest_digest"] + "\n"
-        + "\n".join(repository + ":" + publisher.PUBLICATION["tag"] for repository in publisher.PUBLICATION["repositories"])
-        + "\n\nUse sources.tar.gz for the exact patched source and license notices, and recipe.tar.gz for the frozen patch/build recipe. The generated GitHub source archive contains the integration wrapper.\n"
-    )
-    retain(GitHub(os.environ["GH_TOKEN"]), files, tag, commit, body)
+    body = release_body(files, actual)
+    tag_commit = retain(GitHub(os.environ["GH_TOKEN"]), files, tag, commit, body)
     evidence = work / "evidence/companions.json"
     evidence.parent.mkdir(parents=True, exist_ok=True)
-    evidence.write_text(json.dumps({"status": "pass", "release_url": "https://github.com/treyturner/coder/releases/tag/" + tag, "verification_run_id": args.verification_run_id, "source_commit": commit, "payload_sha256": {name: hashlib.sha256(data).hexdigest() for name, data in sorted(files.items())}, "registry_index_digest": actual["registry_index_digest"]}, indent=2) + "\n")
+    evidence.write_text(json.dumps({"status": "pass", "release_url": "https://github.com/treyturner/coder/releases/tag/" + tag, "verification_run_id": args.verification_run_id, "source_commit": commit, "release_tag_commit": tag_commit, "payload_sha256": {name: hashlib.sha256(data).hexdigest() for name, data in sorted(files.items())}, "registry_index_digest": actual["registry_index_digest"]}, indent=2) + "\n")
     print("Verified durable build records:", tag)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except Exception as error:
         # Signed download URLs, response bodies and authentication never enter logs.
-        print("release delivery stopped; no registry publication may follow", file=sys.stderr)
+        print("release delivery stopped:", str(error) if isinstance(error, ReleaseError) else type(error).__name__, file=sys.stderr)
         sys.exit(1)

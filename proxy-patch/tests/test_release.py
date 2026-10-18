@@ -76,6 +76,52 @@ class ReleaseTests(unittest.TestCase):
         release.retain(client, FILES, TAG, COMMIT, "synthetic binding")
         self.assertEqual(client.writes, writes)
 
+    def test_identical_payload_retries_preserve_original_tag_across_commits(self):
+        client = Fixture()
+        original = release.retain(client, FILES, TAG, COMMIT, "stable payload binding")
+        writes = list(client.writes)
+        retry = release.retain(client, FILES, TAG, "2" * 40, "stable payload binding")
+        self.assertEqual(original, COMMIT)
+        self.assertEqual(retry, COMMIT)
+        self.assertEqual(client.writes, writes)
+        self.assertEqual(client.reference["object"]["sha"], COMMIT)
+
+    def test_bare_tag_at_another_commit_has_no_payload_binding(self):
+        client = Fixture()
+        client.reference = {"object": {"type": "commit", "sha": "2" * 40}}
+        with self.assertRaisesRegex(RuntimeError, "bare release tag"):
+            release.retain(client, FILES, TAG, COMMIT, "stable payload binding")
+        self.assertEqual(client.writes, [])
+
+    def test_partial_draft_retries_across_commits_without_replacing_assets(self):
+        client = Fixture()
+        client.fail_after = 1
+        with self.assertRaises(RuntimeError):
+            release.retain(client, FILES, TAG, COMMIT, "stable payload binding")
+        first = list(client.assets)[0]
+        client.fail_after = None
+        self.assertEqual(release.retain(client, FILES, TAG, "2" * 40, "stable payload binding"), COMMIT)
+        self.assertEqual(client.writes.count(("upload", first)), 1)
+
+    def test_release_identity_is_payload_based(self):
+        actual = {"registry_index_digest": "sha256:" + "1" * 64, "platform_manifest_digest": "sha256:" + "2" * 64}
+        first = release.release_body(FILES, actual)
+        self.assertNotIn("Verification run:", first)
+        self.assertNotIn("Source integration commit:", first)
+        changed = {**FILES, "sources.tar.gz": b"different source"}
+        self.assertNotEqual(first, release.release_body(changed, actual))
+
+    def test_tag_movement_during_readback_is_rejected(self):
+        client = Fixture()
+        release.retain(client, FILES, TAG, COMMIT, "stable payload binding")
+        download = client.download
+        def move_tag(*args, **kwargs):
+            client.reference["object"]["sha"] = "3" * 40
+            return download(*args, **kwargs)
+        with patch.object(client, "download", side_effect=move_tag):
+            with self.assertRaisesRegex(RuntimeError, "tag differs"):
+                release.retain(client, FILES, TAG, "2" * 40, "stable payload binding")
+
     def test_interrupted_draft_resumes_without_replacing_bytes(self):
         client = Fixture()
         client.fail_after = 1
@@ -110,7 +156,7 @@ class ReleaseTests(unittest.TestCase):
                 client = Fixture()
                 release.retain(client, FILES, TAG, COMMIT, "synthetic binding")
                 if conflict == "tag":
-                    client.reference["object"]["sha"] = "2" * 40
+                    client.reference["object"]["type"] = "tag"
                 elif conflict == "body":
                     client.release["body"] = "different binding"
                 elif conflict == "name":
