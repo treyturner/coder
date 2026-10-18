@@ -59,7 +59,7 @@ jobs:
           ], check=True)
           PY
       - name: Verify registry publication behavior using local TLS fixtures
-        run: python3 scripts/publish.py test --work "$PATCH_WORK" --assembly qualified
+        run: python3 scripts/publish.py test --work "$PATCH_WORK"
       - name: Rebuild from a separate source directory
         run: |
           python3 scripts/pipeline.py assemble --work "$PATCH_WORK" --assembly rebuild

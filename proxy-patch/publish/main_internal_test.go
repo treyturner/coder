@@ -27,6 +27,24 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
+func TestRepositoryFlags(t *testing.T) {
+	t.Parallel()
+	var repositories repositoriesFlag
+	for _, value := range []string{"registry.test/owner/coder", "mirror.test/owner/coder"} {
+		if err := repositories.Set(value); err != nil {
+			t.Fatal("valid destination rejected")
+		}
+	}
+	if len(repositories) != 2 {
+		t.Fatal("destination flags were not retained")
+	}
+	for _, value := range []string{"registry.test/owner/coder", "https://registry.test/owner/coder", "user:fixture-secret@registry.test/owner/coder", "owner/coder", "registry.test/owner/coder:tag", "10.0.0.1/team/coder", "127.0.0.1/team/coder", "registry.local/team/coder"} {
+		if err := repositories.Set(value); err == nil {
+			t.Fatal("duplicate, authenticated, implicit, tagged or HTTP destination accepted")
+		}
+	}
+}
+
 func fixture(t *testing.T, binary string) *publication {
 	t.Helper()
 	var raw bytes.Buffer

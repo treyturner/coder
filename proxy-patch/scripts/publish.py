@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("pipeline", ROOT / "scripts/pipeline.py")
@@ -25,37 +26,39 @@ def approved(output, index, manifest):
     pipeline.check(re.fullmatch(r"proxyfix\.[1-9][0-9]*", revision), "invalid patch build number")
     tag = version + "-proxyfix-" + revision.split(".")[1]
     pipeline.check(PUBLICATION["tag"] == tag, "publication tag differs from source lock")
-    pipeline.check(PUBLICATION["repositories"] == ["ghcr.io/treyturner/coder", "forgejo.treyturner.info/treyturner/coder"], "publication destinations differ from approved repositories")
+    repositories = PUBLICATION["repositories"]
+    pipeline.check(isinstance(repositories, list) and bool(repositories) and all(isinstance(value, str) and re.fullmatch(r"[a-z0-9][a-z0-9.-]*/[a-z0-9][a-z0-9._/-]*", value) for value in repositories), "invalid approved publication repositories")
+    pipeline.check(len(set(repositories)) == len(repositories), "duplicate approved publication repositories")
     pipeline.check(index == actual["registry_index_digest"] == PUBLICATION["registry_index_digest"], "approved registry index differs from qualified image")
     pipeline.check(manifest == actual["platform_manifest_digest"] == PUBLICATION["platform_manifest_digest"], "approved platform manifest differs from qualified image")
     pipeline.check(actual["binary_sha256"] == PUBLICATION["binary_sha256"], "qualified CLI checksum differs")
     return actual
 
 
-def prepare(work, parent, test=False):
-    pipeline.validate_assembly(parent)
+def prepare(work, test=False):
     go = str(pipeline.bootstrap(work))
     env = pipeline.build_env(work)
     env["CGO_ENABLED"] = "1" if test else "0"
     directory = work / "tools/registry-publisher"
     directory.mkdir(parents=True, exist_ok=True)
-    # Registry authentication imports two already-selected modules whose zip
-    # sums the CLI does not need. Use a private modfile and pinned extra sums;
-    # the qualified Coder source and go.sum remain untouched.
-    shutil.copyfile(parent / "coder/go.mod", directory / "publisher.mod")
-    sums = (parent / "coder/go.sum").read_text().splitlines() + (ROOT / "publish/registry.sum").read_text().splitlines()
-    (directory / "publisher.sum").write_text("\n".join(sorted(set(sums))) + "\n")
-    modfile = "-modfile=" + str(directory / "publisher.mod")
-    selected = pipeline.run([go, "list", modfile, "-m", "-f", "{{.Version}}", PUBLICATION["registry_client_module"]], cwd=parent / "coder", env=env, capture=True).decode().strip()
-    pipeline.check(selected == PUBLICATION["registry_client_version"], "unexpected registry client version")
-    files = ["main.go"] + (["main_internal_test.go"] if test else [])
+    # Compile only reviewed files, including when retrying in an existing work directory.
+    with tempfile.TemporaryDirectory(prefix="registry-publisher-source-", dir=directory.parent) as scratch:
+        prepare_source(work, Path(scratch), directory, go, env, test)
+
+
+def prepare_source(work, source, directory, go, env, test):
+    files = ("go.mod", "go.sum", "main.go", "main_internal_test.go")
     for name in files:
-        shutil.copyfile(ROOT / "publish" / (name + ".txt"), directory / name)
-    formatted = pipeline.run([str(work / "toolchains/go/bin/gofmt"), "-l", *[str(directory / name) for name in files]], capture=True)
+        shutil.copyfile(ROOT / "publish" / name, source / name)
+    selected = pipeline.run([go, "list", "-m", "-f", "{{.Version}}", PUBLICATION["registry_client_module"]], cwd=source, env=env, capture=True).decode().strip()
+    pipeline.check(selected == PUBLICATION["registry_client_version"], "unexpected registry client version")
+    pipeline.run([go, "mod", "verify"], cwd=source, env=env)
+    files = ("main.go", "main_internal_test.go")
+    formatted = pipeline.run([str(work / "toolchains/go/bin/gofmt"), "-l", *[str(source / name) for name in files]], capture=True)
     pipeline.check(not formatted, "registry publisher needs Go formatting")
     if test:
-        command = [go, "test", modfile, "-race", "-count=1", "-json", *[str(directory / name) for name in files]]
-        result = subprocess.run(command, cwd=parent / "coder", env=env, capture_output=True)
+        command = [go, "test", "-race", "-count=1", "-json", "."]
+        result = subprocess.run(command, cwd=source, env=env, stdin=subprocess.DEVNULL, capture_output=True)
         # Persist only test identifiers/status, never registry responses or headers.
         cases = []
         for line in result.stdout.splitlines():
@@ -72,7 +75,7 @@ def prepare(work, parent, test=False):
         print("Registry publisher race/regression checks passed:", len(cases))
     else:
         binary = directory / "publish"
-        pipeline.run([go, "build", modfile, "-o", str(binary), str(directory / "main.go")], cwd=parent / "coder", env=env)
+        pipeline.run([go, "build", "-o", str(binary), "."], cwd=source, env=env)
         (directory / "publish.sha256").write_text(pipeline.digest(binary.read_bytes()) + "  publish\n")
         print("Registry publisher compiled from pinned module graph.")
 
@@ -81,16 +84,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("build", "test", "verify", "publish"))
     parser.add_argument("--work", type=Path, default=ROOT.parent / ".build")
-    parser.add_argument("--assembly", default="publisher")
     parser.add_argument("--dist", default="dist")
     parser.add_argument("--approved-index")
     parser.add_argument("--approved-manifest")
     args = parser.parse_args()
-    pipeline.check(all(Path(name).name == name and name not in ("", ".", "..") for name in (args.assembly, args.dist)), "assembly and dist must be directory names")
+    pipeline.check(all(Path(name).name == name and name not in ("", ".", "..") for name in (args.dist,)), "dist must be a directory name")
     work = args.work.resolve()
     pipeline.EVIDENCE_DIRECTORY = work / "evidence"
     if args.command in ("build", "test"):
-        prepare(work, work / args.assembly, args.command == "test")
+        prepare(work, args.command == "test")
         return
     output = work / args.dist
     actual = approved(output, args.approved_index, args.approved_manifest)
@@ -101,6 +103,8 @@ def main():
     expected_tool = (binary.parent / "publish.sha256").read_text()
     pipeline.check(expected_tool == pipeline.digest(binary.read_bytes()) + "  publish\n", "registry publisher checksum mismatch")
     command = [str(binary), "--oci", str(output / "oci"), "--index", actual["registry_index_digest"], "--manifest", actual["platform_manifest_digest"], "--binary", actual["binary_sha256"], "--tag", PUBLICATION["tag"]]
+    for repository in PUBLICATION["repositories"]:
+        command += ["--repository", repository]
     try:
         result = subprocess.run(command, capture_output=True, timeout=16 * 60)
         code, captured = result.returncode, result.stdout

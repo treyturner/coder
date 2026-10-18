@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -232,7 +233,27 @@ func (p *publication) publish(refs []name.Tag, opts []remote.Option, emit func(r
 	return nil
 }
 
+type repositoriesFlag []string
+
+func (r *repositoriesFlag) String() string { return strings.Join(*r, ",") }
+
+func (r *repositoriesFlag) Set(value string) error {
+	repository, err := name.NewRepository(value, name.StrictValidation)
+	if err != nil || repository.Name() != value || repository.Registry.Scheme() != "https" || !regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*/[a-z0-9][a-z0-9._/-]*$`).MatchString(value) {
+		return errors.New("invalid destination repository")
+	}
+	for _, existing := range *r {
+		if existing == value {
+			return errors.New("duplicate destination repository")
+		}
+	}
+	*r = append(*r, value)
+	return nil
+}
+
 func main() {
+	var repositories repositoriesFlag
+	flag.Var(&repositories, "repository", "approved destination repository; repeat for each registry")
 	oci := flag.String("oci", "", "verified OCI layout")
 	index := flag.String("index", "", "approved registry index digest")
 	manifest := flag.String("manifest", "", "approved platform manifest digest")
@@ -255,8 +276,11 @@ func main() {
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "local-verified", "index": p.indexSum.String(), "manifest": p.imageSum.String()})
 		return
 	}
+	if len(repositories) == 0 {
+		fail("destination-repositories")
+	}
 	var refs []name.Tag
-	for _, repository := range []string{"ghcr.io/treyturner/coder", "forgejo.treyturner.info/treyturner/coder"} {
+	for _, repository := range repositories {
 		ref, err := name.NewTag(repository+":"+*tag, name.StrictValidation)
 		if err != nil {
 			fail("destination-reference")

@@ -67,9 +67,8 @@ jobs:
           python3 scripts/publish.py verify --work "$PATCH_WORK" --approved-index "$APPROVED_INDEX" --approved-manifest "$APPROVED_MANIFEST"
       - name: Qualify the pinned registry publisher
         run: |
-          python3 scripts/pipeline.py assemble --work "$PATCH_WORK" --assembly publisher
-          python3 scripts/publish.py test --work "$PATCH_WORK" --assembly publisher
-          python3 scripts/publish.py build --work "$PATCH_WORK" --assembly publisher
+          python3 scripts/publish.py test --work "$PATCH_WORK"
+          python3 scripts/publish.py build --work "$PATCH_WORK"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: proxy-registry-publisher
