@@ -13,7 +13,6 @@ permissions:
 
 jobs:
   cleanup:
-    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder'
     runs-on: "ubuntu-latest"
     permissions:
       # Necessary to delete docker images from ghcr.io.

@@ -3,9 +3,9 @@ name: Verify patched proxy CLI
 on:
   push:
     branches: ["main"]
-    paths: ["proxy-patch/**", ".github/workflows/contrib.yaml", ".github/workflows/deploy-docs.yaml", ".github/workflows/doc-check.yaml", ".github/workflows/linear-release.yaml", ".github/workflows/pr-cleanup.yaml", ".github/workflows/pr-deploy.yaml", ".github/workflows/proxy-patch-publish.yml", ".github/workflows/proxy-patch-verify.yml", ".github/workflows/publish-mcp-registry.yaml", ".github/workflows/scorecard.yml", ".gitignore"]
+    paths: ["proxy-patch/**", ".github/workflows/proxy-patch-publish.yml", ".github/workflows/proxy-patch-verify.yml", ".gitignore"]
   pull_request:
-    paths: ["proxy-patch/**", ".github/workflows/contrib.yaml", ".github/workflows/deploy-docs.yaml", ".github/workflows/doc-check.yaml", ".github/workflows/linear-release.yaml", ".github/workflows/pr-cleanup.yaml", ".github/workflows/pr-deploy.yaml", ".github/workflows/proxy-patch-publish.yml", ".github/workflows/proxy-patch-verify.yml", ".github/workflows/publish-mcp-registry.yaml", ".github/workflows/scorecard.yml", ".gitignore"]
+    paths: ["proxy-patch/**", ".github/workflows/proxy-patch-publish.yml", ".github/workflows/proxy-patch-verify.yml", ".gitignore"]
   workflow_dispatch:
 
 permissions: {}
@@ -21,6 +21,7 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+      actions: read
     defaults:
       run:
         working-directory: proxy-patch
@@ -28,6 +29,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Check GitHub fork workflow policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/configure_workflows.py
       - name: Choose temporary build directory
         run: printf 'PATCH_WORK=%s/coder-proxy-patch\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1

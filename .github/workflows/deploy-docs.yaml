@@ -112,7 +112,6 @@ jobs:
   #                      An empty array tells the handler to fall back
   #                      to whole-branch reindex.
   changes:
-    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder'
     runs-on: ubuntu-latest
     outputs:
       manifest_changed: ${{ steps.diff.outputs.manifest_changed }}
@@ -290,7 +289,6 @@ jobs:
   # Path 1: always run. Notifies coder.com to refresh Algolia records
   # and ISR-revalidate the affected pages.
   algolia-and-isr:
-    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder'
     runs-on: ubuntu-latest
     needs: changes
     steps:
@@ -521,7 +519,7 @@ jobs:
   vercel-rebuild:
     runs-on: ubuntu-latest
     needs: changes
-    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder' && (needs.changes.outputs.manifest_changed == 'true' || needs.changes.outputs.redirects_changed == 'true')
+    if: needs.changes.outputs.manifest_changed == 'true' || needs.changes.outputs.redirects_changed == 'true'
     steps:
       - name: Trigger Vercel deploy hook
         env:

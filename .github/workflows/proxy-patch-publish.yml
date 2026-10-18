@@ -41,6 +41,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Recheck GitHub fork workflow policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/configure_workflows.py
       - name: Choose temporary build directory
         run: printf 'PATCH_WORK=%s/coder-proxy-publish\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -96,6 +100,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Recheck GitHub fork workflow policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/configure_workflows.py
       - name: Choose temporary build directory
         run: printf 'PATCH_WORK=%s/coder-proxy-companions\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -141,6 +149,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Recheck GitHub fork workflow policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/configure_workflows.py
       - name: Choose temporary build and authentication directories
         run: |
           printf 'PATCH_WORK=%s/coder-proxy-publish\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"

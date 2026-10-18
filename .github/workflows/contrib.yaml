@@ -28,7 +28,6 @@ jobs:
       pull-requests: write
     if: >-
       ${{
-        github.server_url == 'https://github.com' && github.repository == 'coder/coder' &&
         github.event_name == 'pull_request_target' &&
         github.event.action == 'opened'
       }}
@@ -98,7 +97,6 @@ jobs:
 
   cla:
     runs-on: ubuntu-latest
-    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder'
     permissions:
       pull-requests: write
     steps:
