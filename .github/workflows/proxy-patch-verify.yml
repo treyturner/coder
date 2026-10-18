@@ -3,9 +3,9 @@ name: Verify patched proxy CLI
 on:
   push:
     branches: ["main", "proxy-patch/**"]
-    paths: ["proxy-patch/**", ".gitignore", ".github/workflows/ci.yaml", ".github/workflows/contrib.yaml", ".github/workflows/doc-check.yaml", ".github/workflows/pr-cleanup.yaml", ".github/workflows/pr-deploy.yaml", ".github/workflows/linear-release.yaml", ".github/workflows/scorecard.yml", ".github/workflows/proxy-patch-verify.yml", ".github/workflows/proxy-patch-publish.yml"]
+    paths: ["proxy-patch/**", ".github/workflows/ci.yaml", ".github/workflows/contrib.yaml", ".github/workflows/deploy-docs.yaml", ".github/workflows/doc-check.yaml", ".github/workflows/linear-release.yaml", ".github/workflows/pr-cleanup.yaml", ".github/workflows/pr-deploy.yaml", ".github/workflows/proxy-patch-publish.yml", ".github/workflows/proxy-patch-verify.yml", ".github/workflows/publish-mcp-registry.yaml", ".github/workflows/scorecard.yml", ".gitignore"]
   pull_request:
-    paths: ["proxy-patch/**", ".gitignore", ".github/workflows/ci.yaml", ".github/workflows/contrib.yaml", ".github/workflows/doc-check.yaml", ".github/workflows/pr-cleanup.yaml", ".github/workflows/pr-deploy.yaml", ".github/workflows/linear-release.yaml", ".github/workflows/scorecard.yml", ".github/workflows/proxy-patch-verify.yml", ".github/workflows/proxy-patch-publish.yml"]
+    paths: ["proxy-patch/**", ".github/workflows/ci.yaml", ".github/workflows/contrib.yaml", ".github/workflows/deploy-docs.yaml", ".github/workflows/doc-check.yaml", ".github/workflows/linear-release.yaml", ".github/workflows/pr-cleanup.yaml", ".github/workflows/pr-deploy.yaml", ".github/workflows/proxy-patch-publish.yml", ".github/workflows/proxy-patch-verify.yml", ".github/workflows/publish-mcp-registry.yaml", ".github/workflows/scorecard.yml", ".gitignore"]
   workflow_dispatch:
 
 permissions: {}
@@ -36,7 +36,7 @@ jobs:
       - name: Reproduce the original defect
         run: python3 scripts/pipeline.py baseline --work "$PATCH_WORK" --assembly baseline
       - name: Qualify pinned source and build the image
-        run: python3 scripts/pipeline.py all --work "$PATCH_WORK" --assembly qualified
+        run: python3 scripts/ci_pipeline.py all --work "$PATCH_WORK" --assembly qualified
       - name: Compare hosted image with reviewed release identities
         run: |
           python3 - <<'PY'

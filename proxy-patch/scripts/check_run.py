@@ -4,11 +4,25 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 
-def main():
-    if len(sys.argv) != 2 or not re.fullmatch(r"[1-9][0-9]*", sys.argv[1]):
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def open_api(request):
+    try:
+        return urllib.request.build_opener(NoRedirect()).open(request, timeout=30)
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise RuntimeError("source workflow request failed") from None
+
+
+def verified_run(run_id):
+    if not re.fullmatch(r"[1-9][0-9]*", run_id):
         raise RuntimeError("verification run ID must be a positive integer")
     if os.environ.get("GITHUB_SERVER_URL") != "https://github.com":
         raise RuntimeError("publishing requires the GitHub Actions origin")
@@ -16,10 +30,10 @@ def main():
     if not token:
         raise RuntimeError("existing Actions read authentication is unavailable")
     request = urllib.request.Request(
-        "https://api.github.com/repos/treyturner/coder/actions/runs/" + sys.argv[1],
+        "https://api.github.com/repos/treyturner/coder/actions/runs/" + run_id,
         headers={"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json"},
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with open_api(request) as response:
         run = json.load(response)
     allowed = (
         run.get("status") == "completed"
@@ -32,6 +46,13 @@ def main():
     )
     if not allowed:
         raise RuntimeError("run is not a successful trusted proxy-patch verification")
+    return run
+
+
+def main():
+    if len(sys.argv) != 2:
+        raise RuntimeError("provide one verification run ID")
+    verified_run(sys.argv[1])
     print("Verified source workflow run:", sys.argv[1])
 
 

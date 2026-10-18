@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       verification_run_id:
-        description: Successful Verify patched proxy CLI run containing the approved artifact
+        description: Successful Verify patched proxy CLI run for the current main commit
         type: string
         required: true
       approved_index:
@@ -77,9 +77,54 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  publish:
+  companions:
     if: github.server_url == 'https://github.com' && github.repository == 'treyturner/coder' && github.ref == 'refs/heads/main'
     needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    defaults:
+      run:
+        working-directory: proxy-patch
+    env:
+      VERIFY_RUN_ID: ${{ inputs.verification_run_id }}
+      APPROVED_INDEX: ${{ inputs.approved_index }}
+      APPROVED_MANIFEST: ${{ inputs.approved_manifest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Choose temporary build directory
+        run: printf 'PATCH_WORK=%s/coder-proxy-companions\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.14.4'
+      - name: Select frozen packaging runtime
+        run: python3 scripts/ci_packager.py --work "$PATCH_WORK"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: coder-proxy-linux-amd64
+          path: ${{ env.PATCH_WORK }}/dist
+          repository: treyturner/coder
+          run-id: ${{ inputs.verification_run_id }}
+          github-token: ${{ github.token }}
+      - name: Retain and read back exact approved build records
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py --work "$PATCH_WORK" --verification-run-id "$VERIFY_RUN_ID" --approved-index "$APPROVED_INDEX" --approved-manifest "$APPROVED_MANIFEST"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: proxy-companion-receipt
+          path: ${{ env.PATCH_WORK }}/evidence/companions.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  publish:
+    if: github.server_url == 'https://github.com' && github.repository == 'treyturner/coder' && github.ref == 'refs/heads/main'
+    needs: [prepare, companions]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:

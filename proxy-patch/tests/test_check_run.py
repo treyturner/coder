@@ -30,7 +30,7 @@ class SourceRunTests(unittest.TestCase):
             invalid.append(changed)
         suffixed = {**valid, "path": valid["path"] + "@proxy-patch/v2.37.4"}
         for run in [valid, suffixed, *invalid]:
-            with self.subTest(run=run), patch("sys.argv", ["check_run.py", "123"]), patch.dict("os.environ", {"GH_TOKEN": "synthetic-actions-read-token", "GITHUB_SERVER_URL": "https://github.com"}, clear=True), patch.object(check_run.urllib.request, "urlopen", return_value=io.BytesIO(json.dumps(run).encode())), contextlib.redirect_stdout(io.StringIO()):
+            with self.subTest(run=run), patch("sys.argv", ["check_run.py", "123"]), patch.dict("os.environ", {"GH_TOKEN": "synthetic-actions-read-token", "GITHUB_SERVER_URL": "https://github.com"}, clear=True), patch.object(check_run, "open_api", return_value=io.BytesIO(json.dumps(run).encode())), contextlib.redirect_stdout(io.StringIO()):
                 if run in (valid, suffixed):
                     check_run.main()
                 else:
@@ -39,14 +39,14 @@ class SourceRunTests(unittest.TestCase):
 
     def test_invalid_run_id_never_contacts_github(self):
         for value in ("0", "-1", "../123", "123?redirect=elsewhere", "", "123\n456"):
-            with self.subTest(value=value), patch("sys.argv", ["check_run.py", value]), patch.object(check_run.urllib.request, "urlopen") as request:
+            with self.subTest(value=value), patch("sys.argv", ["check_run.py", value]), patch.object(check_run, "open_api") as request:
                 with self.assertRaises(RuntimeError):
                     check_run.main()
                 request.assert_not_called()
 
     def test_mirror_token_never_sent_to_github(self):
         for origin in ("https://forgejo.treyturner.info", "", "https://github.example.invalid"):
-            with self.subTest(origin=origin), patch("sys.argv", ["check_run.py", "123"]), patch.dict("os.environ", {"GITHUB_SERVER_URL": origin, "GH_TOKEN": "synthetic-mirror-token"}, clear=True), patch.object(check_run.urllib.request, "urlopen") as request:
+            with self.subTest(origin=origin), patch("sys.argv", ["check_run.py", "123"]), patch.dict("os.environ", {"GITHUB_SERVER_URL": origin, "GH_TOKEN": "synthetic-mirror-token"}, clear=True), patch.object(check_run, "open_api") as request:
                 with self.assertRaises(RuntimeError):
                     check_run.main()
                 request.assert_not_called()

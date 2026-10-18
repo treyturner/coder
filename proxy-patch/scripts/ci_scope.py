@@ -12,6 +12,8 @@ ROOT_FILES = frozenset((
     ".github/workflows/ci.yaml",
     ".github/workflows/contrib.yaml",
     ".github/workflows/doc-check.yaml",
+    ".github/workflows/deploy-docs.yaml",
+    ".github/workflows/publish-mcp-registry.yaml",
     ".github/workflows/pr-cleanup.yaml",
     ".github/workflows/pr-deploy.yaml",
     ".github/workflows/linear-release.yaml",
