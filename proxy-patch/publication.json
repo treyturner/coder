@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "repositories": [
+    "ghcr.io/treyturner/coder",
+    "forgejo.treyturner.info/treyturner/coder"
+  ],
+  "tag": "2.37.4-proxyfix-1",
+  "registry_index_digest": "sha256:dc6e6ed42ec8e5ff0a4bf72da5a43a87a66528cd60a1c554173d2ef7225f2759",
+  "platform_manifest_digest": "sha256:51be698a535461b8d1d5b19c88c5fb20c99691862e46b68e0fa6283bed1cd107",
+  "binary_sha256": "491b6f355a2e54f7fbfdd24dffcf7b7b26e2e7d637086e690597cde82708ff6c",
+  "registry_client_module": "github.com/google/go-containerregistry",
+  "registry_client_version": "v0.20.7"
+}

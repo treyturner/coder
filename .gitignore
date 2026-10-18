@@ -134,3 +134,6 @@ docs/.audit/
 
 /release-action
 test-timings.tsv
+
+# Local source assembly and artifacts for the proxy CLI patch queue.
+/.build/

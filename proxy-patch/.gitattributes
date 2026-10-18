@@ -1,0 +1,4 @@
+# Unified diff context contains structural spaces before Go indentation.
+patches/*.patch -whitespace
+# Preserve the captured baseline fixture as test data.
+tests/baseline_test.go.txt whitespace=-blank-at-eof
