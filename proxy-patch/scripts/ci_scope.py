@@ -9,7 +9,6 @@ import sys
 
 ROOT_FILES = frozenset((
     ".gitignore",
-    ".github/workflows/ci.yaml",
     ".github/workflows/contrib.yaml",
     ".github/workflows/doc-check.yaml",
     ".github/workflows/deploy-docs.yaml",

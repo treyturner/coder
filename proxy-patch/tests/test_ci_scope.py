@@ -19,9 +19,9 @@ class ScopeTests(unittest.TestCase):
             return ci_scope.wrapper_only(ROOT, "https://github.com", "treyturner/coder", "pull_request", BASE)
 
     def test_production_paths_always_keep_ordinary_ci(self):
-        allowed = ["proxy-patch/scripts/pipeline.py", ".github/workflows/proxy-patch-verify.yml", ".github/workflows/ci.yaml"]
+        allowed = ["proxy-patch/scripts/pipeline.py", ".github/workflows/proxy-patch-verify.yml"]
         self.assertTrue(self.classify(allowed))
-        for path in ("go.mod", "cli/ssh.go", "coderd/database/queries/users.sql", "site/src/App.tsx", ".github/workflows/release.yaml", "proxy-patch-other/file"):
+        for path in (".github/workflows/ci.yaml", "go.mod", "cli/ssh.go", "coderd/database/queries/users.sql", "site/src/App.tsx", ".github/workflows/release.yaml", "proxy-patch-other/file"):
             with self.subTest(path=path):
                 self.assertFalse(self.classify([*allowed, path]))
         self.assertFalse(self.classify([]))
