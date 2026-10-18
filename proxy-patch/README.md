@@ -1,6 +1,6 @@
 # Coder CLI proxy patch
 
-This patch queue builds a Coder **v2.37.4** CLI that uses the configured HTTP or HTTPS proxy for DERP WebSocket fallback. It also bounds post-upgrade DERP establishment, closes failed connections, separates HTTPS-proxy TLS from relay TLS, and removes remote bodies and authenticated URLs from connection diagnostics.
+This patch queue builds a Coder **v2.37.4** CLI that uses the configured HTTP or HTTPS proxy for DERP WebSocket fallback. It also bounds post-upgrade DERP establishment, closes failed connections, separates HTTPS-proxy TLS from relay TLS, and removes remote bodies and authenticated URLs from connection diagnostics. Connection failures retain fixed TLS verification, DNS, refusal and timeout categories, context sentinel identity, numeric HTTP status and numeric region context.
 
 The server reported running is v2.37.4. Deployment observations from v2.36.7 are historical. Local fixtures establish the routing defect and the patched behavior; they do not establish that the current deployment permits DERP or SSH. The initial DERP 403 has an unverified origin and remains a separate policy question. A proxy CONNECT denial does not authorize direct fallback.
 

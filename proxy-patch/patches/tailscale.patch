@@ -1,20 +1,125 @@
+diff --git a/derp/derphttp/connection_proxy_internal_test.go b/derp/derphttp/connection_proxy_internal_test.go
+new file mode 100644
+index 000000000..6149dc9b2
+--- /dev/null
++++ b/derp/derphttp/connection_proxy_internal_test.go
+@@ -0,0 +1,82 @@
++// Copyright (c) Tailscale Inc & AUTHORS
++// SPDX-License-Identifier: BSD-3-Clause
++
++package derphttp
++
++import (
++	"context"
++	"crypto/tls"
++	"crypto/x509"
++	"errors"
++	"fmt"
++	"net"
++	"os"
++	"strings"
++	"sync"
++	"syscall"
++	"testing"
++	"time"
++
++	"tailscale.com/tailcfg"
++	"tailscale.com/types/key"
++)
++
++func TestProxyConnectionDiagnostics(t *testing.T) {
++	t.Parallel()
++	for _, tc := range []struct {
++		name string
++		err  error
++		want string
++	}{
++		{"TLS wrapper", &tls.CertificateVerificationError{Err: errors.New("fixture-secret")}, "TLS verification"},
++		{"unknown authority", x509.UnknownAuthorityError{}, "TLS verification"},
++		{"hostname", x509.HostnameError{Host: "fixture-secret"}, "TLS verification"},
++		{"invalid certificate", x509.CertificateInvalidError{}, "TLS verification"},
++		{"DNS", &net.DNSError{Name: "fixture-secret", Err: "fixture-secret"}, "DNS"},
++		{"refused", syscall.ECONNREFUSED, "connection refused"},
++		{"deadline", os.ErrDeadlineExceeded, "timeout"},
++		{"unknown", errors.New("fixture-secret"), "proxy dial failed"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Parallel()
++			err := safeConnectError(context.Background(), "proxy dial", fmt.Errorf("fixture-secret: %w", tc.err))
++			if !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "fixture-secret") {
++				t.Fatal("safe diagnostic category missing or underlying text disclosed")
++			}
++		})
++	}
++}
++
++func TestProxyConnectionDeadlineRetainsCategory(t *testing.T) {
++	t.Parallel()
++	ctx, cancel := context.WithDeadline(context.Background(), time.Unix(1, 0))
++	defer cancel()
++	err := safeConnectError(ctx, "proxy dial", &net.DNSError{Name: "fixture-secret"})
++	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "DNS") || strings.Contains(err.Error(), "fixture-secret") {
++		t.Fatal("deadline lost identity or safe cause category")
++	}
++}
++
++func TestProxyConnectionRegionDiagnostic(t *testing.T) {
++	t.Parallel()
++	region := &tailcfg.DERPRegion{RegionID: 17, RegionCode: "fixture-secret"}
++	var logMu sync.Mutex
++	var logs strings.Builder
++	c := NewRegionClient(key.NewNode(), func(format string, args ...any) {
++		logMu.Lock()
++		defer logMu.Unlock()
++		fmt.Fprintf(&logs, format, args...)
++	}, nil, func() *tailcfg.DERPRegion { return region })
++	defer c.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	err := c.Connect(ctx)
++	logMu.Lock()
++	defer logMu.Unlock()
++	if !strings.Contains(logs.String(), "connecting to derp-17") || strings.Contains(logs.String(), "fixture-secret") {
++		t.Fatal("numeric region log missing or remote region text disclosed in diagnostics")
++	}
++	if err == nil || !strings.Contains(err.Error(), "derp-17") || strings.Contains(err.Error(), "fixture-secret") {
++		t.Fatal("numeric region context missing or remote region text disclosed")
++	}
++}
 diff --git a/derp/derphttp/derphttp_client.go b/derp/derphttp/derphttp_client.go
-index fb6e321bc..f3038ba5e 100644
+index fb6e321bc..aa8c79f93 100644
 --- a/derp/derphttp/derphttp_client.go
 +++ b/derp/derphttp/derphttp_client.go
-@@ -435,10 +435,7 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
+@@ -22,10 +22,12 @@
+ 	"net/http"
+ 	"net/netip"
+ 	"net/url"
++	"os"
+ 	"runtime"
+ 	"strings"
+ 	"sync"
+ 	"sync/atomic"
++	"syscall"
+ 	"time"
+ 
+ 	"go4.org/mem"
+@@ -435,10 +437,12 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
  
  	defer func() {
  		if err != nil {
 -			if ctx.Err() != nil {
 -				err = fmt.Errorf("%v: %v", ctx.Err(), err)
--			}
++			safe := safeConnectError(ctx, "connection", err)
++			if reg != nil {
++				err = fmt.Errorf("%s connect to derp-%d: %w", caller, reg.RegionID, safe)
++			} else {
++				err = fmt.Errorf("%s: %w", caller, safe)
+ 			}
 -			err = fmt.Errorf("%s connect to %v: %v", caller, c.targetString(reg), err)
-+			err = fmt.Errorf("%s: %w", caller, safeConnectError(ctx, "connection", err))
  			if tcpConn != nil {
  				go tcpConn.Close()
  			}
-@@ -496,34 +493,22 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
+@@ -496,37 +500,25 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
  			urlStr = c.url.String()
  			tlsConfig = c.tlsConfig(nil)
  		}
@@ -51,8 +156,12 @@ index fb6e321bc..f3038ba5e 100644
 +		c.logf("%s: connecting to DERP URL", caller)
  		tcpConn, err = c.dialURL(ctx)
  	default:
- 		c.logf("%s: connecting to derp-%d (%v)", caller, reg.RegionID, reg.RegionCode)
-@@ -646,7 +631,7 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
+-		c.logf("%s: connecting to derp-%d (%v)", caller, reg.RegionID, reg.RegionCode)
++		c.logf("%s: connecting to derp-%d", caller, reg.RegionID)
+ 		tcpConn, node, err = c.DialRegion(ctx, reg)
+ 	}
+ 	if err != nil {
+@@ -646,7 +638,7 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
  		}
  		c.logf("%s: DERP server returned status %d", caller, resp.StatusCode)
  		if resp.StatusCode != http.StatusSwitchingProtocols {
@@ -61,7 +170,7 @@ index fb6e321bc..f3038ba5e 100644
  			resp.Body.Close()
  
  			// There's a situation where a proxy doesn't have an HTTP handler
-@@ -654,10 +639,10 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
+@@ -654,10 +646,10 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
  			// For safety, we'll assume that status codes >= 400 are
  			// proxies that don't support WebSockets.
  			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
@@ -74,7 +183,7 @@ index fb6e321bc..f3038ba5e 100644
  		}
  
  	}
-@@ -685,6 +670,79 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
+@@ -685,6 +677,118 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
  	return c.client, c.connGen, nil
  }
  
@@ -120,41 +229,80 @@ index fb6e321bc..f3038ba5e 100644
 +	return client, nil
 +}
 +
-+// connectionError carries only local stage labels and numeric HTTP status codes.
-+// Remote error text, response bodies, and authenticated URLs are not diagnostics.
++// connectionError contains fixed diagnostics and safe context sentinels.
++// Authenticated URLs, remote bodies, and underlying error text are excluded.
 +type connectionError struct {
 +	stage  string
 +	status int
++	kind   string
++	cause  error
 +}
 +
 +func (e *connectionError) Error() string {
++	message := "derphttp: " + e.stage + " failed"
 +	if e.status != 0 {
-+		return fmt.Sprintf("derphttp: %s failed (HTTP %d)", e.stage, e.status)
++		message += fmt.Sprintf(" (HTTP %d)", e.status)
 +	}
-+	return "derphttp: " + e.stage + " failed"
++	if e.kind != "" {
++		message += " (" + e.kind + ")"
++	}
++	if e.cause != nil {
++		message += ": " + e.cause.Error()
++	}
++	return message
 +}
 +
++func (e *connectionError) Unwrap() error { return e.cause }
++
 +func safeConnectError(ctx context.Context, stage string, err error) error {
-+	if ctx.Err() != nil {
-+		return ctx.Err()
-+	}
-+	if errors.Is(err, context.Canceled) {
-+		return context.Canceled
-+	}
-+	if errors.Is(err, context.DeadlineExceeded) {
-+		return context.DeadlineExceeded
-+	}
 +	var safe *connectionError
-+	if errors.As(err, &safe) {
-+		return safe
++	if !errors.As(err, &safe) {
++		safe = &connectionError{stage: stage, kind: connectErrorKind(err)}
 +	}
-+	return &connectionError{stage: stage}
++	cause := ctx.Err()
++	if cause == nil {
++		switch {
++		case errors.Is(err, context.Canceled):
++			cause = context.Canceled
++		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
++			cause = context.DeadlineExceeded
++		}
++	}
++	if cause != nil {
++		copy := *safe
++		copy.cause = cause
++		return &copy
++	}
++	return safe
++}
++
++func connectErrorKind(err error) string {
++	var verification *tls.CertificateVerificationError
++	var authority x509.UnknownAuthorityError
++	var hostname x509.HostnameError
++	var invalid x509.CertificateInvalidError
++	var dns *net.DNSError
++	var network net.Error
++	switch {
++	case errors.As(err, &verification), errors.As(err, &authority), errors.As(err, &hostname), errors.As(err, &invalid):
++		return "TLS verification"
++	case errors.As(err, &dns):
++		return "DNS"
++	case errors.Is(err, syscall.ECONNREFUSED):
++		return "connection refused"
++	case errors.Is(err, os.ErrDeadlineExceeded), errors.Is(err, context.DeadlineExceeded):
++		return "timeout"
++	case errors.As(err, &network) && network.Timeout():
++		return "timeout"
++	default:
++		return ""
++	}
 +}
 +
  // SetURLDialer sets the dialer to use for dialing URLs.
  // This dialer is only use for clients created with NewClient, not NewRegionClient.
  // If unset or nil, the default dialer is used.
-@@ -876,7 +934,11 @@ func (c *Client) dialNode(ctx context.Context, n *tailcfg.DERPNode) (net.Conn, e
+@@ -876,7 +980,11 @@ func (c *Client) dialNode(ctx context.Context, n *tailcfg.DERPNode) (net.Conn, e
  			Path:   "/", // unused
  		},
  	}
@@ -167,7 +315,7 @@ index fb6e321bc..f3038ba5e 100644
  		return c.dialNodeUsingProxy(ctx, n, proxyURL)
  	}
  
-@@ -968,25 +1030,29 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
+@@ -968,25 +1076,29 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
  		var d net.Dialer
  		proxyConn, err = d.DialContext(ctx, "tcp", net.JoinHostPort(pu.Hostname(), firstStr(pu.Port(), "80")))
  	}
@@ -209,7 +357,7 @@ index fb6e321bc..f3038ba5e 100644
  		}
  	}()
  
-@@ -999,7 +1065,7 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
+@@ -999,7 +1111,7 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
  
  	var authHeader string
  	if v, err := tshttpproxy.GetAuthHeader(pu); err != nil {
@@ -218,7 +366,7 @@ index fb6e321bc..f3038ba5e 100644
  	} else if v != "" {
  		authHeader = fmt.Sprintf("Proxy-Authorization: %s\r\n", v)
  	}
-@@ -1017,12 +1083,11 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
+@@ -1017,12 +1129,11 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
  		if ctx.Err() != nil {
  			return nil, ctx.Err()
  		}
