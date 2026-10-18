@@ -54,7 +54,7 @@ def locked_bytes():
 def run(args, cwd=None, env=None, capture=False, expected=0):
     # Tool failures may include authenticated URLs or remote response text.
     # Never stream them or persist raw diagnostic output in build artifacts.
-    result = subprocess.run(args, cwd=cwd, env=env, capture_output=True, check=False)
+    result = subprocess.run(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, check=False)
     command = Path(args[0]).name
     operation = args[1] if len(args) > 1 and args[1] in ("test", "vet", "mod", "list", "version", "apply", "clone", "fetch", "init", "add", "diff") else ""
     check(result.returncode == expected, "verification command failed: " + command + " " + operation)

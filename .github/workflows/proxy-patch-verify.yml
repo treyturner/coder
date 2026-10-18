@@ -36,7 +36,7 @@ jobs:
       - name: Reproduce the original defect
         run: python3 scripts/pipeline.py baseline --work "$PATCH_WORK" --assembly baseline
       - name: Qualify pinned source and build the image
-        run: python3 scripts/ci_pipeline.py all --work "$PATCH_WORK" --assembly qualified
+        run: python3 scripts/pipeline.py all --work "$PATCH_WORK" --assembly qualified
       - name: Compare hosted image with reviewed release identities
         run: |
           python3 - <<'PY'
