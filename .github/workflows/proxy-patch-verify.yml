@@ -2,10 +2,10 @@ name: Verify patched proxy CLI
 
 on:
   push:
-    branches: [proxy-patch/**]
-    paths: [proxy-patch/**, .github/workflows/proxy-patch-*.yml]
+    branches: ["main", "proxy-patch/**"]
+    paths: ["proxy-patch/**", ".gitignore", ".github/workflows/ci.yaml", ".github/workflows/contrib.yaml", ".github/workflows/doc-check.yaml", ".github/workflows/pr-cleanup.yaml", ".github/workflows/pr-deploy.yaml", ".github/workflows/linear-release.yaml", ".github/workflows/scorecard.yml", ".github/workflows/proxy-patch-verify.yml", ".github/workflows/proxy-patch-publish.yml"]
   pull_request:
-    paths: [proxy-patch/**, .github/workflows/proxy-patch-*.yml]
+    paths: ["proxy-patch/**", ".gitignore", ".github/workflows/ci.yaml", ".github/workflows/contrib.yaml", ".github/workflows/doc-check.yaml", ".github/workflows/pr-cleanup.yaml", ".github/workflows/pr-deploy.yaml", ".github/workflows/linear-release.yaml", ".github/workflows/scorecard.yml", ".github/workflows/proxy-patch-verify.yml", ".github/workflows/proxy-patch-publish.yml"]
   workflow_dispatch:
 
 permissions: {}
@@ -29,12 +29,26 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.14.4'
+      - name: Select frozen packaging runtime
+        run: python3 scripts/ci_packager.py --work "$PATCH_WORK"
       - name: Verify packaging safeguards
         run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Reproduce the original defect
         run: python3 scripts/pipeline.py baseline --work "$PATCH_WORK" --assembly baseline
       - name: Qualify pinned source and build the image
         run: python3 scripts/pipeline.py all --work "$PATCH_WORK" --assembly qualified
+      - name: Compare hosted image with reviewed release identities
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          with open("publication.json") as source:
+              release = json.load(source)
+          subprocess.run([
+              sys.executable, "scripts/publish.py", "verify", "--work", os.environ["PATCH_WORK"],
+              "--approved-index", release["registry_index_digest"],
+              "--approved-manifest", release["platform_manifest_digest"],
+          ], check=True)
+          PY
       - name: Verify registry publication behavior using local TLS fixtures
         run: python3 scripts/publish.py test --work "$PATCH_WORK" --assembly qualified
       - name: Rebuild from a separate source directory

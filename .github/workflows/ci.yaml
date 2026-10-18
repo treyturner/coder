@@ -26,15 +26,41 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  scope:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      wrapper-only: ${{ steps.classify.outputs.wrapper-only || 'false' }}
+    steps:
+      - name: Checkout fork packaging changes
+        if: github.server_url == 'https://github.com' && github.repository == 'treyturner/coder' && (github.event_name == 'push' || github.event_name == 'pull_request')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Classify fork packaging changes
+        id: classify
+        if: github.server_url == 'https://github.com' && github.repository == 'treyturner/coder' && (github.event_name == 'push' || github.event_name == 'pull_request')
+        env:
+          PATCH_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if test -f proxy-patch/scripts/ci_scope.py; then
+            python3 proxy-patch/scripts/ci_scope.py
+          else
+            printf 'wrapper-only=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
   changes:
+    needs: scope
     runs-on: ubuntu-latest
     # For create events, only run on release branches to avoid
     # triggering CI for every feature branch creation.
     if: |
-      github.event_name != 'create' || (
+      needs.scope.outputs.wrapper-only != 'true' && (github.event_name != 'create' || (
         github.event.ref_type == 'branch' &&
         startsWith(github.event.ref, 'release/')
-      )
+      ))
     outputs:
       docs-only: ${{ steps.filter.outputs.docs_count == steps.filter.outputs.all_count }}
       docs: ${{ steps.filter.outputs.docs }}
@@ -1123,13 +1149,15 @@ jobs:
 
   storybook:
     name: Storybook
+    needs: scope
+    if: needs.scope.outputs.wrapper-only != 'true'
 
     runs-on: ${{ github.repository_owner == 'coder' && 'depot-ubuntu-24.04-16' || 'ubuntu-latest' }}
 
     # Forks and Dependabot receive no secrets, so they only build Storybook;
     # trusted runs snapshot it against Pixel instead.
     env:
-      PIXEL_ENABLED: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.head.repo.fork && github.actor != 'dependabot[bot]') }}
+      PIXEL_ENABLED: ${{ github.server_url == 'https://github.com' && github.repository == 'coder/coder' && (github.event_name != 'pull_request' || (!github.event.pull_request.head.repo.fork && github.actor != 'dependabot[bot]')) }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1217,6 +1245,7 @@ jobs:
   required:
     runs-on: ubuntu-latest
     needs:
+      - scope
       - changes
       - fmt
       - lint
@@ -1243,6 +1272,7 @@ jobs:
       - name: Ensure required checks
         run: | # zizmor: ignore[template-injection] We're just reading needs.x.result here, no risk of injection
           echo "Checking required checks"
+          echo "- scope: ${{ needs.scope.result }}"
           echo "- changes: ${{ needs.changes.result }}"
           echo "- fmt: ${{ needs.fmt.result }}"
           echo "- lint: ${{ needs.lint.result }}"
@@ -1311,7 +1341,7 @@ jobs:
     # to main branch.
     needs:
       - changes
-    if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && needs.changes.outputs.docs-only == 'false' && !github.event.pull_request.head.repo.fork
+    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && needs.changes.outputs.docs-only == 'false' && !github.event.pull_request.head.repo.fork
     runs-on: ${{ github.repository_owner == 'coder' && 'depot-ubuntu-22.04-8' || 'ubuntu-22.04' }}
     permissions:
       # Necessary to push docker images to ghcr.io.
@@ -1675,7 +1705,8 @@ jobs:
       - changes
       - build
     if: |
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
+      github.server_url == 'https://github.com' && github.repository == 'coder/coder'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
       && needs.changes.outputs.docs-only == 'false'
       && !github.event.pull_request.head.repo.fork
     uses: ./.github/workflows/deploy.yaml
@@ -1723,7 +1754,7 @@ jobs:
     needs:
       - required
     runs-on: ubuntu-latest
-    if: failure() && github.ref == 'refs/heads/main'
+    if: failure() && github.server_url == 'https://github.com' && github.repository == 'coder/coder' && github.ref == 'refs/heads/main'
 
     steps:
       - name: Send Slack notification

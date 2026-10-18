@@ -34,6 +34,7 @@ permissions:
 
 jobs:
   check_pr:
+    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder'
     runs-on: ubuntu-latest
     outputs:
       PR_OPEN: ${{ steps.check_pr.outputs.pr_open }}
@@ -63,7 +64,7 @@ jobs:
 
   get_info:
     needs: check_pr
-    if: ${{ needs.check_pr.outputs.PR_OPEN == 'true' }}
+    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder' && needs.check_pr.outputs.PR_OPEN == 'true'
     outputs:
       PR_NUMBER: ${{ steps.pr_info.outputs.PR_NUMBER }}
       PR_TITLE: ${{ steps.pr_info.outputs.PR_TITLE }}
@@ -178,7 +179,7 @@ jobs:
 
   comment-pr:
     needs: get_info
-    if: needs.get_info.outputs.BUILD == 'true' || github.event.inputs.deploy == 'true'
+    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder' && (needs.get_info.outputs.BUILD == 'true' || github.event.inputs.deploy == 'true')
     runs-on: "ubuntu-latest"
     permissions:
       pull-requests: write # needed for commenting on PRs
@@ -214,7 +215,7 @@ jobs:
   build:
     needs: get_info
     # Run build job only if there are changes in the files that we care about or if the workflow is manually triggered with --build flag
-    if: needs.get_info.outputs.BUILD == 'true'
+    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder' && needs.get_info.outputs.BUILD == 'true'
     runs-on: ${{ github.repository_owner == 'coder' && 'depot-ubuntu-22.04-8' || 'ubuntu-latest' }}
     permissions:
       # Necessary to push docker images to ghcr.io.
@@ -277,7 +278,8 @@ jobs:
     needs: [build, get_info]
     # Run deploy job only if build job was successful or skipped
     if: |
-      always() && (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      always() && github.server_url == 'https://github.com' && github.repository == 'coder/coder' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
       (needs.get_info.outputs.BUILD == 'true' || github.event.inputs.deploy == 'true')
     runs-on: "ubuntu-latest"
     permissions:

@@ -46,6 +46,8 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.14.4'
+      - name: Select frozen packaging runtime
+        run: python3 scripts/ci_packager.py --work "$PATCH_WORK"
       - name: Check source verification run
         env:
           GH_TOKEN: ${{ github.token }}
@@ -101,6 +103,8 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.14.4'
+      - name: Select frozen packaging runtime
+        run: python3 scripts/ci_packager.py --work "$PATCH_WORK"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: coder-proxy-linux-amd64

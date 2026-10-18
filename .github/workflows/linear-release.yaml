@@ -17,7 +17,7 @@ concurrency:
 jobs:
   sync-main:
     name: Sync issues to next Linear release
-    if: github.event_name == 'push' && github.ref_name == 'main'
+    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder' && github.event_name == 'push' && github.ref_name == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,7 +56,7 @@ jobs:
 
   sync-release-branch:
     name: Sync backports to Linear release
-    if: github.event_name == 'push' && startsWith(github.ref_name, 'release/')
+    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder' && github.event_name == 'push' && startsWith(github.ref_name, 'release/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -84,6 +84,7 @@ jobs:
     name: Move Linear release to Code Freeze
     needs: sync-release-branch
     if: >
+      github.server_url == 'https://github.com' && github.repository == 'coder/coder' &&
       github.event_name == 'push' &&
       startsWith(github.ref_name, 'release/') &&
       github.event.created == true

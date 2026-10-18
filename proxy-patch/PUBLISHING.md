@@ -6,6 +6,8 @@ Run commands from `proxy-patch/`, following [README.md](README.md) and the [revi
 
 The GitHub repository is `treyturner/coder`. Its Forgejo pull mirror carries source and workflow files. Both active workflows check the GitHub server origin and repository; publication also requires `main`. The source-run checker rejects mirror origins before using a token. Registry images require separate copies to both destinations.
 
+The inherited Coder workflow classifies changed paths before selecting checks. On this GitHub fork, a nonempty diff confined to `proxy-patch/`, its two workflows, seven named fork CI files (`ci.yaml`, `contrib.yaml`, `doc-check.yaml`, `pr-cleanup.yaml`, `pr-deploy.yaml`, `linear-release.yaml`, `scorecard.yml`), and `.gitignore` uses the pinned patch qualification workflow. This selection applies to pull requests and pushes on `main` or `proxy-patch/**`, matching verification's branch and path filters. Any production-source path keeps ordinary repository CI; an unverifiable comparison fails the scope gate. A branch name alone never suppresses checks. Coder's organization membership, CLA store, preview publishing, deployment and cleanup, documentation-review workloads, Linear sync, Scorecard publication, Pixel snapshots and Slack notification jobs are restricted to `github.com/coder/coder`. Generic PR title and release-label checks remain active. A passing patch run qualifies the pinned CLI, not the unrelated current repository-root server source.
+
 ## Image references and identities
 
 The requested external naming convention is `treyturner/coder:<upstream_version>-proxyfix-<build_number>`. The qualified build uses:
@@ -39,6 +41,8 @@ After the image and destinations are approved, manually dispatch **Publish appro
 Publication never starts from a push or pull request. The job checks the source workflow identity and success, verifies the downloaded artifact against the current frozen recipe, source lock and both supplied digests, and qualifies a registry publisher from the pinned Go/module graph. The separate publishing job repeats artifact verification before binding registry credentials. Its temporary authentication files are removed and never uploaded.
 
 The publisher uses go-containerregistry v0.20.7, with the same module versions selected by the qualified Coder graph. Registry authentication needs two additional already-selected module zip checksums, retained in `publish/registry.sum`. A private modfile adds them without editing the qualified source or its `go.sum`.
+
+GitHub's prebuilt Python can use a different zlib runtime from the qualified host. Each CI job checks the frozen Python/zlib combination first. When required, `scripts/ci_packager.py` builds the checksummed official zlib 1.3.1 source under the job's temporary directory, probes a fresh Python process with that library, and selects it through the job environment. It performs no global install and preserves TLS verification. This integration changes neither the frozen recipe nor the qualified image.
 
 Both registry tags are checked before any writes. An existing matching index is accepted for an idempotent retry; a conflicting index, authorization error, TLS error or network failure stops the operation. The publisher copies the stored registry index, rather than the OCI layout catalog, without reformatting manifests or recompressing layers. It then reads back the index, platform manifest, config, every compressed layer and embedded CLI checksum from each registry. Safe per-registry results are uploaded as `proxy-publication-receipt`.
 
