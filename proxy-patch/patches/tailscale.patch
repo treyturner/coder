@@ -87,7 +87,7 @@ index 000000000..6149dc9b2
 +	}
 +}
 diff --git a/derp/derphttp/derphttp_client.go b/derp/derphttp/derphttp_client.go
-index fb6e321bc..aa8c79f93 100644
+index fb6e321bc..798691043 100644
 --- a/derp/derphttp/derphttp_client.go
 +++ b/derp/derphttp/derphttp_client.go
 @@ -22,10 +22,12 @@
@@ -183,7 +183,7 @@ index fb6e321bc..aa8c79f93 100644
  		}
  
  	}
-@@ -685,6 +677,118 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
+@@ -685,6 +677,120 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
  	return c.client, c.connGen, nil
  }
  
@@ -284,6 +284,8 @@ index fb6e321bc..aa8c79f93 100644
 +	var dns *net.DNSError
 +	var network net.Error
 +	switch {
++	case errors.Is(err, tshttpproxy.ErrConflictingProxyEnvironment):
++		return "conflicting proxy environment"
 +	case errors.As(err, &verification), errors.As(err, &authority), errors.As(err, &hostname), errors.As(err, &invalid):
 +		return "TLS verification"
 +	case errors.As(err, &dns):
@@ -302,7 +304,7 @@ index fb6e321bc..aa8c79f93 100644
  // SetURLDialer sets the dialer to use for dialing URLs.
  // This dialer is only use for clients created with NewClient, not NewRegionClient.
  // If unset or nil, the default dialer is used.
-@@ -876,7 +980,11 @@ func (c *Client) dialNode(ctx context.Context, n *tailcfg.DERPNode) (net.Conn, e
+@@ -876,7 +982,11 @@ func (c *Client) dialNode(ctx context.Context, n *tailcfg.DERPNode) (net.Conn, e
  			Path:   "/", // unused
  		},
  	}
@@ -315,7 +317,7 @@ index fb6e321bc..aa8c79f93 100644
  		return c.dialNodeUsingProxy(ctx, n, proxyURL)
  	}
  
-@@ -968,25 +1076,29 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
+@@ -968,25 +1078,29 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
  		var d net.Dialer
  		proxyConn, err = d.DialContext(ctx, "tcp", net.JoinHostPort(pu.Hostname(), firstStr(pu.Port(), "80")))
  	}
@@ -357,7 +359,7 @@ index fb6e321bc..aa8c79f93 100644
  		}
  	}()
  
-@@ -999,7 +1111,7 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
+@@ -999,7 +1113,7 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
  
  	var authHeader string
  	if v, err := tshttpproxy.GetAuthHeader(pu); err != nil {
@@ -366,7 +368,7 @@ index fb6e321bc..aa8c79f93 100644
  	} else if v != "" {
  		authHeader = fmt.Sprintf("Proxy-Authorization: %s\r\n", v)
  	}
-@@ -1017,12 +1129,11 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
+@@ -1017,12 +1131,11 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
  		if ctx.Err() != nil {
  			return nil, ctx.Err()
  		}
@@ -549,10 +551,10 @@ index 89c281b3d..03ba9e7d9 100644
  }
 diff --git a/derp/derphttp/websocket_proxy_test.go b/derp/derphttp/websocket_proxy_test.go
 new file mode 100644
-index 000000000..d2d21ee18
+index 000000000..e28265495
 --- /dev/null
 +++ b/derp/derphttp/websocket_proxy_test.go
-@@ -0,0 +1,906 @@
+@@ -0,0 +1,899 @@
 +// Copyright (c) Tailscale Inc & AUTHORS
 +// SPDX-License-Identifier: BSD-3-Clause
 +
@@ -794,7 +796,7 @@ index 000000000..d2d21ee18
 +		{name: "https", target: "wss://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://secure-proxy.test:8080", "HTTP_PROXY": "http://plain-proxy.test:8080"}, want: "secure-proxy.test:8080"},
 +		{name: "http", target: "ws://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://secure-proxy.test:8080", "HTTP_PROXY": "http://plain-proxy.test:8080"}, want: "plain-proxy.test:8080"},
 +		{name: "lowercase", target: "https://relay.test/derp", env: map[string]string{"https_proxy": "http://lower-proxy.test:8080"}, want: "lower-proxy.test:8080"},
-+		{name: "case_conflict", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://upper-proxy.test:8080", "https_proxy": "http://lower-proxy.test:8080"}, want: "lower-proxy.test:8080"},
++		{name: "case_conflict", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://upper-proxy.test:8080", "https_proxy": "http://lower-proxy.test:8080"}, wantError: true},
 +		{name: "all_proxy_unchanged", target: "https://relay.test/derp", env: map[string]string{"ALL_PROXY": "http://unused-proxy.test:8080"}},
 +		{name: "domain_bypass", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "relay.test"}},
 +		{name: "suffix_bypass", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": ".test"}},
@@ -803,7 +805,7 @@ index 000000000..d2d21ee18
 +		{name: "port_bypass", target: "https://relay.test:8443/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "relay.test:8443"}},
 +		{name: "port_mismatch", target: "https://relay.test:8443/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "relay.test:443"}, want: "proxy.test:8080"},
 +		{name: "wildcard_bypass", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "*"}},
-+		{name: "lowercase_no_proxy_wins", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "other.test", "no_proxy": "relay.test"}},
++		{name: "lowercase_no_proxy_conflict", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "other.test", "no_proxy": "relay.test"}, wantError: true},
 +		{name: "cgi_error", target: "http://relay.test/derp", env: map[string]string{"HTTP_PROXY": "http://proxy.test:8080", "REQUEST_METHOD": "GET"}, wantError: true},
 +		{name: "unsupported_scheme", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "socks5://proxy.test:1080"}, wantError: true},
 +	} {
@@ -828,14 +830,7 @@ index 000000000..d2d21ee18
 +			if (tc.want == "" && u != nil) || (tc.want != "" && (u == nil || u.Host != tc.want)) {
 +				t.Fatal("unexpected proxy selection")
 +			}
-+			if tc.name == "case_conflict" {
-+				req, _ := http.NewRequest("GET", tc.target, nil)
-+				standard, err := http.ProxyFromEnvironment(req)
-+				proxyMust(t, err)
-+				if standard == nil || standard.Host != "upper-proxy.test:8080" {
-+					t.Fatal("locked Go API selector expectation changed")
-+				}
-+			}
++
 +		})
 +	}
 +}
@@ -1459,3 +1454,93 @@ index 000000000..d2d21ee18
 +		})
 +	}
 +}
+diff --git a/net/tshttpproxy/proxy_environment_internal_test.go b/net/tshttpproxy/proxy_environment_internal_test.go
+new file mode 100644
+index 000000000..07b33d795
+--- /dev/null
++++ b/net/tshttpproxy/proxy_environment_internal_test.go
+@@ -0,0 +1,38 @@
++// Copyright (c) Tailscale Inc & AUTHORS
++// SPDX-License-Identifier: BSD-3-Clause
++
++package tshttpproxy
++
++import (
++	"errors"
++	"strings"
++	"testing"
++)
++
++func TestProxyEnvironmentConflicts(t *testing.T) {
++	t.Parallel()
++	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"} {
++		for _, variant := range []string{"upper", "lower", "equal", "different", "empty"} {
++			t.Run(name+"/"+variant, func(t *testing.T) {
++				t.Parallel()
++				values := map[string]string{}
++				if variant == "upper" || variant == "equal" || variant == "different" {
++					values[name] = "fixture-secret-upper"
++				}
++				if variant == "lower" || variant == "equal" || variant == "different" {
++					values[strings.ToLower(name)] = "fixture-secret-upper"
++				}
++				if variant == "different" {
++					values[strings.ToLower(name)] = "fixture-secret-lower"
++				}
++				err := checkProxyEnvironment(func(key string) string { return values[key] })
++				if (variant == "different") != errors.Is(err, ErrConflictingProxyEnvironment) {
++					t.Fatal("unexpected conflict decision")
++				}
++				if err != nil && strings.Contains(err.Error(), "fixture-secret") {
++					t.Fatal("proxy setting value disclosed")
++				}
++			})
++		}
++	}
++}
+diff --git a/net/tshttpproxy/tshttpproxy.go b/net/tshttpproxy/tshttpproxy.go
+index 24b0050e9..a70442545 100644
+--- a/net/tshttpproxy/tshttpproxy.go
++++ b/net/tshttpproxy/tshttpproxy.go
+@@ -7,6 +7,7 @@
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"log"
+ 	"net"
+@@ -117,10 +118,33 @@ func SetSelfProxy(addrs ...string) {
+ // For example, WPAD PAC files on Windows.
+ var sysProxyFromEnv func(*http.Request) (*url.URL, error)
+ 
++// ErrConflictingProxyEnvironment reports ambiguous case variants without values.
++var ErrConflictingProxyEnvironment = errors.New("conflicting proxy environment")
++
++// CheckProxyEnvironment rejects different nonempty upper/lowercase proxy values.
++// This conservative policy prevents API and DERP selectors choosing different
++// routes. Equal values and configurations with only one variant are unchanged.
++func CheckProxyEnvironment() error {
++	return checkProxyEnvironment(os.Getenv)
++}
++
++func checkProxyEnvironment(getenv func(string) string) error {
++	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"} {
++		upper, lower := getenv(name), getenv(strings.ToLower(name))
++		if upper != "" && lower != "" && upper != lower {
++			return ErrConflictingProxyEnvironment
++		}
++	}
++	return nil
++}
++
+ // ProxyFromEnvironment is like the standard library's http.ProxyFromEnvironment
+ // but additionally does OS-specific proxy lookups if the environment variables
+ // alone don't specify a proxy.
+ func ProxyFromEnvironment(req *http.Request) (*url.URL, error) {
++	if err := CheckProxyEnvironment(); err != nil {
++		return nil, err
++	}
+ 	localProxyFunc := getProxyFunc()
+ 	u, err := localProxyFunc(req.URL)
+ 	if u != nil && err == nil {

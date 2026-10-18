@@ -276,15 +276,15 @@ def test(work, parent, race=False):
     args = [go, "test", "-count=1", "-timeout=180s"]
     if race:
         args += ["-race", "-run", "^TestProxy"]
-    args += ["tailscale.com/derp/...", "./codersdk/workspacesdk"]
+    args += ["tailscale.com/derp/...", "tailscale.com/net/tshttpproxy", "./codersdk/workspacesdk"]
     mode = "race" if race else "regression"
     run_go_tests(work, parent, args, "DERP and SDK " + mode)
     if not race:
-        cli_args = [go, "test", "-count=1", "-timeout=180s", "-run", "^TestProxySSHDisabledAutostart$", "./cli"]
+        cli_args = [go, "test", "-count=1", "-timeout=180s", "-run", "^TestProxy(SSHDisabledAutostart|CLIEnvironmentGuard)$", "./cli"]
         run_go_tests(work, parent, cli_args, "CLI autostart regression")
         run_go_tests(work, parent, [go, "test", "-count=1", "-timeout=180s", "./tailnet/..."], "tailnet regression")
         print("Running Go vet and module verification.", flush=True)
-        run([go, "vet", "tailscale.com/derp/...", "./codersdk/workspacesdk", "./cli"], cwd=parent / "coder", env=env)
+        run([go, "vet", "tailscale.com/derp/...", "tailscale.com/net/tshttpproxy", "./codersdk/workspacesdk", "./cli"], cwd=parent / "coder", env=env)
     run([go, "mod", "verify"], cwd=parent / "coder", env=env)
     print("Passed", "race" if race else "regression, tailnet, CLI, vet and module", "checks.")
 

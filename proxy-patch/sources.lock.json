@@ -9,18 +9,18 @@
       "url": "https://github.com/coder/coder.git",
       "commit": "1d246291a8a6ae1948b8c825ee252f6a46bfd561",
       "base_tree": "76e7b86ddb72651e2c98bcb09e0a13a29a12bff2",
-      "patched_tree": "b8b6be8406b9ec5cb69063dde89a7f868bb97dee",
+      "patched_tree": "15464ec1d1f034aa801384b5d2d31b749c113aef",
       "patch": "patches/coder.patch",
-      "patch_sha256": "217cef78b81337ff78f04f596a718904cc452534056dfe0f9b1fd416a75d41b8"
+      "patch_sha256": "615c13dfabd7277b8a804d791cfee3776afee4e7f66fa8d5d2765d61f3271880"
     },
     "tailscale": {
       "url": "https://github.com/coder/tailscale.git",
       "commit": "b7c5fc6e639929414866313e40a587d9c341117d",
       "original_replacement": "github.com/coder/tailscale v1.1.1-0.20260529105257-b7c5fc6e6399",
       "base_tree": "8937c993c01a95b0596d9401ddef7b05201175f7",
-      "patched_tree": "31271c35cf9f0570738f77f153e4a28419e00f7a",
+      "patched_tree": "26966bbaecd5c069d123ee37a2bcfeddb6492cdc",
       "patch": "patches/tailscale.patch",
-      "patch_sha256": "a726a639187d1fe275c644ba579675ca7f77ea0f37614a1d1c8cf8f409ad2d92"
+      "patch_sha256": "c70521fa35678108d4f19b5deedfca8c3e7add2b3f4b026719268b249c9680b2"
     }
   },
   "go": {

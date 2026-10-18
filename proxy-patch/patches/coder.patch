@@ -1,3 +1,68 @@
+diff --git a/cli/proxy_environment_internal_test.go b/cli/proxy_environment_internal_test.go
+new file mode 100644
+index 000000000..9c9a2dafb
+--- /dev/null
++++ b/cli/proxy_environment_internal_test.go
+@@ -0,0 +1,37 @@
++package cli
++
++import (
++	"context"
++	"os"
++	"os/exec"
++	"strings"
++	"testing"
++
++	"github.com/coder/coder/v2/testutil"
++)
++
++func TestProxyCLIEnvironmentGuard(t *testing.T) {
++	t.Parallel()
++	if os.Getenv("CODER_PROXY_ENV_FIXTURE") == "1" {
++		// The client must fail before headers, version checks, or API dialing.
++		_, err := (&RootCmd{}).createHTTPClient(context.Background(), nil, nil)
++		if err == nil || !strings.Contains(err.Error(), "conflicting proxy environment") || strings.Contains(err.Error(), "fixture-secret") {
++			t.Fatal("client configuration did not reject ambiguous proxy settings safely")
++		}
++		return
++	}
++	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"} {
++		t.Run(name, func(t *testing.T) {
++			t.Parallel()
++			ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
++			defer cancel()
++			//nolint:gosec // This binary and constant selectors are test-controlled.
++			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProxyCLIEnvironmentGuard$", "-test.timeout=10s")
++			cmd.Env = []string{"CODER_PROXY_ENV_FIXTURE=1", "GOTRACEBACK=none", name + "=fixture-secret-upper", strings.ToLower(name) + "=fixture-secret-lower"}
++			output, err := cmd.CombinedOutput()
++			if err != nil || strings.Contains(string(output), "fixture-secret") {
++				t.Fatal("isolated CLI proxy guard failed or disclosed a setting")
++			}
++		})
++	}
++}
+diff --git a/cli/root.go b/cli/root.go
+index 747e01f97..291c1404a 100644
+--- a/cli/root.go
++++ b/cli/root.go
+@@ -31,6 +31,7 @@ import (
+ 	"github.com/mitchellh/go-wordwrap"
+ 	"golang.org/x/mod/semver"
+ 	"golang.org/x/xerrors"
++	"tailscale.com/net/tshttpproxy"
+ 
+ 	"github.com/coder/coder/v2/buildinfo"
+ 	"github.com/coder/coder/v2/cli/cliui"
+@@ -882,6 +883,9 @@ func (r *RootCmd) createHTTPClient(ctx context.Context, serverURL *url.URL, inv
+ }
+ 
+ func newHTTPTransport(tlsConfig *tls.Config) (http.RoundTripper, error) {
++	if err := tshttpproxy.CheckProxyEnvironment(); err != nil {
++		return nil, xerrors.Errorf("proxy configuration: %w", err)
++	}
+ 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+ 	if !ok {
+ 		if tlsConfig != nil {
 diff --git a/cli/ssh_proxy_test.go b/cli/ssh_proxy_test.go
 new file mode 100644
 index 000000000..c5bef604f

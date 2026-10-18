@@ -75,7 +75,7 @@ The pipeline pins byte-sensitive packaging versions and fixes source timestamps,
 
 | Area | Local coverage |
 | --- | --- |
-| Selection | HTTP_PROXY, HTTPS_PROXY, lowercase variants, conflicts, NO_PROXY domain/suffix/IP/CIDR/port/wildcard, CGI error, unchanged ALL_PROXY behavior, unsupported schemes fail closed |
+| Selection | HTTP_PROXY, HTTPS_PROXY, lowercase variants, unequal nonempty case variants rejected before CLI API and DERP traffic, NO_PROXY domain/suffix/IP/CIDR/port/wildcard, CGI error, unchanged ALL_PROXY behavior, unsupported schemes fail closed |
 | Routing | HTTP CONNECT, HTTPS proxy, plain HTTP absolute-form upgrade, permitted direct and NO_PROXY traffic, zero unintended origin DNS, guarded IPv4 dialing |
 | TLS/auth | Different proxy and relay roots/names, verified chains, relay-only client certificate, synthetic proxy Basic auth, silent auth callback errors, API session and inner gateway headers kept on their intended hops |
 | Denials | CONNECT 403/407, inner 403, malformed 101, wrong subprotocol, redirects rejected without reaching the target, synthetic remote secret markers absent from diagnostics |
