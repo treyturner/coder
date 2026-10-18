@@ -2,13 +2,17 @@ name: Verify patched proxy CLI
 
 on:
   push:
-    branches: ["main", "proxy-patch/**"]
+    branches: ["main"]
     paths: ["proxy-patch/**", ".github/workflows/contrib.yaml", ".github/workflows/deploy-docs.yaml", ".github/workflows/doc-check.yaml", ".github/workflows/linear-release.yaml", ".github/workflows/pr-cleanup.yaml", ".github/workflows/pr-deploy.yaml", ".github/workflows/proxy-patch-publish.yml", ".github/workflows/proxy-patch-verify.yml", ".github/workflows/publish-mcp-registry.yaml", ".github/workflows/scorecard.yml", ".gitignore"]
   pull_request:
     paths: ["proxy-patch/**", ".github/workflows/contrib.yaml", ".github/workflows/deploy-docs.yaml", ".github/workflows/doc-check.yaml", ".github/workflows/linear-release.yaml", ".github/workflows/pr-cleanup.yaml", ".github/workflows/pr-deploy.yaml", ".github/workflows/proxy-patch-publish.yml", ".github/workflows/proxy-patch-verify.yml", ".github/workflows/publish-mcp-registry.yaml", ".github/workflows/scorecard.yml", ".gitignore"]
   workflow_dispatch:
 
 permissions: {}
+
+concurrency:
+  group: proxy-patch-verify-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:

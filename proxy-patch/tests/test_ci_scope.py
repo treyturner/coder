@@ -39,7 +39,7 @@ class ScopeTests(unittest.TestCase):
             self.assertTrue(ci_scope.wrapper_only(ROOT, "https://github.com", "treyturner/coder", "push", BASE, "refs/heads/main"))
             self.assertEqual(command.call_args_list[1].args, (ROOT, "fetch", "--no-tags", "--depth=1", "origin", BASE))
         with patch.object(ci_scope, "git", side_effect=(b"", b"proxy-patch/README.md\0")) as command:
-            self.assertTrue(ci_scope.wrapper_only(ROOT, "https://github.com", "treyturner/coder", "push", "0" * 40, "refs/heads/proxy-patch/v2.37.4"))
+            self.assertTrue(ci_scope.wrapper_only(ROOT, "https://github.com", "treyturner/coder", "push", "0" * 40, "refs/heads/main"))
             self.assertEqual(command.call_args_list[0].args, (ROOT, "fetch", "--no-tags", "--depth=1", "origin", "main"))
 
     def test_invalid_comparisons_fail_the_scope_gate(self):
@@ -60,7 +60,7 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(len(filters), 2)
         for paths in filters:
             self.assertEqual(set(json.loads(paths)), {"proxy-patch/**", *ci_scope.ROOT_FILES})
-        for ref in ("refs/heads/release/2.37", "refs/heads/unrelated", "refs/tags/v2.37.4", ""):
+        for ref in ("refs/heads/proxy-patch/v2.37.4", "refs/heads/release/2.37", "refs/heads/unrelated", "refs/tags/v2.37.4", ""):
             with self.subTest(ref=ref), patch.object(ci_scope, "git") as command:
                 self.assertFalse(ci_scope.wrapper_only(ROOT, "https://github.com", "treyturner/coder", "push", BASE, ref))
                 command.assert_not_called()

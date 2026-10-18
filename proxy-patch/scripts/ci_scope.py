@@ -20,7 +20,7 @@ ROOT_FILES = frozenset((
     ".github/workflows/proxy-patch-verify.yml",
     ".github/workflows/proxy-patch-publish.yml",
 ))
-PUSH_BRANCHES = ("main", "proxy-patch/**")
+PUSH_BRANCHES = ("main",)
 
 
 def git(root, *args, optional=False):
