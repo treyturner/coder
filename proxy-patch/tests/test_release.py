@@ -58,7 +58,7 @@ class Fixture:
         self.writes.append(("upload", name))
         self.assets[name] = data
 
-    def download(self, asset_id, size, authenticated=True):
+    def download(self, asset_id, size, authenticated=True, tag=None, name=None):
         if not authenticated:
             assert self.release["draft"] is False
         value = list(self.assets.values())[asset_id - 1]
@@ -198,6 +198,31 @@ class ReleaseTests(unittest.TestCase):
                 request.assert_not_called()
         with self.assertRaises(RuntimeError):
             client.request("https://release-assets.githubusercontent.com/file")
+
+    def test_public_delivery_uses_web_download_without_anonymous_api_calls(self):
+        client = release.GitHub("synthetic-github-token")
+        calls = []
+        def open_request(request, timeout):
+            calls.append(request)
+            if len(calls) == 1:
+                raise urllib.error.HTTPError(request.full_url, 302, "synthetic", {"Location": "https://release-assets.githubusercontent.com/synthetic?signature=synthetic"}, None)
+            return io.BytesIO(b"payload")
+        with patch.object(client.opener, "open", side_effect=open_request):
+            self.assertEqual(client.download(1, 7, authenticated=False, tag=TAG, name="sources.tar.gz"), b"payload")
+        self.assertEqual(calls[0].full_url, release.PUBLIC + TAG + "/sources.tar.gz")
+        for request in calls:
+            self.assertIsNone(request.get_header("Authorization"))
+            self.assertFalse(request.full_url.startswith(release.API))
+        with self.assertRaisesRegex(RuntimeError, "anonymous"):
+            client.request(release.API + "/releases/assets/1", authenticated=False)
+
+    def test_public_redirect_to_another_repository_is_rejected(self):
+        client = release.GitHub("synthetic-github-token")
+        redirect = urllib.error.HTTPError(release.PUBLIC + TAG + "/sources.tar.gz", 302, "synthetic", {"Location": "https://github.com/another/repo/releases/download/tag/asset"}, None)
+        with patch.object(client.opener, "open", side_effect=redirect) as request:
+            with self.assertRaisesRegex(RuntimeError, "untrusted"):
+                client.download(1, 7, authenticated=False, tag=TAG, name="sources.tar.gz")
+        self.assertEqual(request.call_count, 1)
 
     def test_wrong_origin_or_source_never_starts_delivery(self):
         arguments = ["release.py", "--work", "/unused", "--verification-run-id", "123", "--approved-index", "synthetic", "--approved-manifest", "synthetic"]

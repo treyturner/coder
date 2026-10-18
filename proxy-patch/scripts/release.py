@@ -26,6 +26,7 @@ publisher = module("publish")
 source_run = module("check_run")
 API = "https://api.github.com/repos/treyturner/coder"
 UPLOAD = "https://uploads.github.com/repos/treyturner/coder"
+PUBLIC = "https://github.com/treyturner/coder/releases/download/"
 ASSET_HOSTS = frozenset(("release-assets.githubusercontent.com", "objects.githubusercontent.com"))
 PAYLOAD = frozenset((
     "SHA256SUMS", "coder", "coder-cli.oci.tar", "image-digests.json", "module-info.txt",
@@ -51,11 +52,14 @@ class GitHub:
     def request(self, url, method="GET", data=None, binary=False, authenticated=True):
         parsed = urllib.parse.urlsplit(url)
         trusted_api = url.startswith(API + "/") or url.startswith(UPLOAD + "/")
+        trusted_public = url.startswith(PUBLIC) and not parsed.query
         if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443) or parsed.fragment:
             raise ReleaseError("untrusted release endpoint")
         if authenticated and not trusted_api:
             raise ReleaseError("refusing authentication outside the fixed release API")
-        if not trusted_api and parsed.hostname not in ASSET_HOSTS:
+        if not authenticated and trusted_api:
+            raise ReleaseError("refusing anonymous release API download")
+        if not trusted_api and not trusted_public and parsed.hostname not in ASSET_HOSTS:
             raise ReleaseError("untrusted asset storage endpoint")
         headers = {"Accept": "application/octet-stream" if binary else "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
         if authenticated:
@@ -82,22 +86,33 @@ class GitHub:
         with self.request(url, "POST", data, binary=True) as response:
             return json.load(response)
 
-    def download(self, asset_id, size, authenticated=True):
-        try:
-            response = self.request(API + "/releases/assets/" + identifier(asset_id), binary=True, authenticated=authenticated)
-        except urllib.error.HTTPError as error:
-            redirected = error.code in (301, 302, 303, 307, 308)
-            location = error.headers.get("Location", "")
-            error.close()
-            if not redirected:
-                raise ReleaseError("release asset download failed") from None
-            # Signed storage redirects are fetched without the GitHub token.
-            response = self.request(location, binary=True, authenticated=False)
-        with response:
-            value = response.read(size + 1)
-        if len(value) != size:
-            raise ReleaseError("release asset size differs")
-        return value
+    def download(self, asset_id, size, authenticated=True, tag=None, name=None):
+        if authenticated:
+            url = API + "/releases/assets/" + identifier(asset_id)
+        else:
+            if not tag or not name:
+                raise ReleaseError("public asset identity is unavailable")
+            url = PUBLIC + urllib.parse.quote(tag, safe="") + "/" + urllib.parse.quote(name, safe="")
+        for _ in range(4):
+            try:
+                response = self.request(url, binary=True, authenticated=authenticated)
+            except urllib.error.HTTPError as error:
+                redirected = error.code in (301, 302, 303, 307, 308)
+                location = error.headers.get("Location", "")
+                status = error.code
+                error.close()
+                if not redirected or not location:
+                    raise ReleaseError("release asset download failed (HTTP " + str(status) + ")") from None
+                # Every redirected request is revalidated and carries no token.
+                url = urllib.parse.urljoin(url, location)
+                authenticated = False
+                continue
+            with response:
+                value = response.read(size + 1)
+            if len(value) != size:
+                raise ReleaseError("release asset size differs")
+            return value
+        raise ReleaseError("release asset redirect limit exceeded")
 
 
 def identifier(value):
@@ -152,7 +167,7 @@ def retain(client, files, tag, commit, body):
             data = files[asset["name"]]
             if asset.get("state") != "uploaded" or asset.get("size") != len(data):
                 raise ReleaseError("release asset metadata conflicts")
-            if client.download(asset["id"], len(data), authenticated=not public) != data:
+            if client.download(asset["id"], len(data), authenticated=not public, tag=tag if public else None, name=asset["name"] if public else None) != data:
                 raise ReleaseError("release asset checksum differs")
         return set(names)
 
