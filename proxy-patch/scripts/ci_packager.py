@@ -73,5 +73,5 @@ if __name__ == "__main__":
     try:
         main()
     except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
-        print("CI packager stopped:", str(error) if isinstance(error, RuntimeError) else type(error).__name__, file=sys.stderr)
+        print("CI packager stopped:", str(error) if isinstance(error, pipeline.PipelineError) else type(error).__name__, file=sys.stderr)
         sys.exit(1)

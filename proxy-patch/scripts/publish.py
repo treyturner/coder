@@ -88,6 +88,7 @@ def main():
     args = parser.parse_args()
     pipeline.check(all(Path(name).name == name and name not in ("", ".", "..") for name in (args.assembly, args.dist)), "assembly and dist must be directory names")
     work = args.work.resolve()
+    pipeline.EVIDENCE_DIRECTORY = work / "evidence"
     if args.command in ("build", "test"):
         prepare(work, work / args.assembly, args.command == "test")
         return
@@ -130,5 +131,5 @@ if __name__ == "__main__":
     try:
         main()
     except (RuntimeError, OSError, ValueError, KeyError) as error:
-        print("publication stopped:", str(error) if isinstance(error, RuntimeError) else type(error).__name__, file=sys.stderr)
+        print("publication stopped:", str(error) if isinstance(error, pipeline.PipelineError) else type(error).__name__, file=sys.stderr)
         sys.exit(1)

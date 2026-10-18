@@ -8,6 +8,10 @@ import urllib.error
 import urllib.request
 
 
+class RunCheckError(RuntimeError):
+    """A fixed local verification-run diagnostic safe for workflow logs."""
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -17,18 +21,19 @@ def open_api(request):
     try:
         return urllib.request.build_opener(NoRedirect()).open(request, timeout=30)
     except urllib.error.HTTPError as error:
+        status = error.code
         error.close()
-        raise RuntimeError("source workflow request failed") from None
+        raise RunCheckError("source workflow request failed (HTTP " + str(status) + ")") from None
 
 
 def verified_run(run_id):
     if not re.fullmatch(r"[1-9][0-9]*", run_id):
-        raise RuntimeError("verification run ID must be a positive integer")
+        raise RunCheckError("verification run ID must be a positive integer")
     if os.environ.get("GITHUB_SERVER_URL") != "https://github.com":
-        raise RuntimeError("publishing requires the GitHub Actions origin")
+        raise RunCheckError("publishing requires the GitHub Actions origin")
     token = os.environ.get("GH_TOKEN")
     if not token:
-        raise RuntimeError("existing Actions read authentication is unavailable")
+        raise RunCheckError("existing Actions read authentication is unavailable")
     request = urllib.request.Request(
         "https://api.github.com/repos/treyturner/coder/actions/runs/" + run_id,
         headers={"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json"},
@@ -45,13 +50,13 @@ def verified_run(run_id):
         and (run.get("head_branch", "").startswith("proxy-patch/") or run.get("head_branch") == "main")
     )
     if not allowed:
-        raise RuntimeError("run is not a successful trusted proxy-patch verification")
+        raise RunCheckError("run is not a successful trusted proxy-patch verification")
     return run
 
 
 def main():
     if len(sys.argv) != 2:
-        raise RuntimeError("provide one verification run ID")
+        raise RunCheckError("provide one verification run ID")
     verified_run(sys.argv[1])
     print("Verified source workflow run:", sys.argv[1])
 
@@ -59,7 +64,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except Exception as error:
         # Never print remote response bodies, URLs or authentication material.
-        print("verification-run check failed", file=sys.stderr)
+        print("verification-run check failed:", str(error) if isinstance(error, RunCheckError) else type(error).__name__, file=sys.stderr)
         sys.exit(1)

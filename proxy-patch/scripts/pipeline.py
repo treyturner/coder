@@ -26,14 +26,63 @@ LOCK_BYTES = (ROOT / "sources.lock.json").read_bytes()
 LOCK = json.loads(LOCK_BYTES)
 OCI = "application/vnd.oci.image."
 BOOTSTRAPPED = set()
+EVIDENCE_DIRECTORY = None
 RECIPE_FILES = ("README.md", "LICENSE", "Dockerfile", "sources.lock.json", "scripts/pipeline.py",
                 "tests/test_pipeline.py", "tests/baseline_test.go.txt", "tests/oci_validate.go.txt", ".github/workflows/verify.yml",
                 "patches/coder.patch", "patches/tailscale.patch", "docs/PLAN.md")
 
 
+class PipelineError(RuntimeError):
+    """A locally generated failure message that excludes remote diagnostics."""
+
+
+def safe_diagnostics(data, cwd=None):
+    text = data.decode(errors="replace")
+    categories = set()
+    for label, pattern in (
+        ("syntax error", r"syntax error|expected .*found"),
+        ("undefined identifier", r"undefined:|undefined reference"),
+        ("type mismatch", r"cannot use |incompatible type|does not implement"),
+        ("patch conflict", r"patch does not apply|patch failed:"),
+        ("TLS verification", r"x509:|certificate verify failed|certificate verification"),
+        ("DNS", r"no such host|name resolution|dial tcp: lookup"),
+        ("proxy access", r"proxyconnect|proxy authentication|HTTP (403|407)"),
+        ("timeout", r"timed out|deadline exceeded|timeout"),
+        ("formatting", r"gofumpt|gci|not gofmt"),
+    ):
+        if re.search(pattern, text, re.IGNORECASE):
+            categories.add(label)
+    locations = set()
+    root = Path(cwd).resolve() if cwd else None
+    if root:
+        for name, line in re.findall(r"(?m)^([^\n:]+\.go):([1-9][0-9]*)(?::[0-9]+)?:", text):
+            path = (root / name).resolve()
+            if path.is_relative_to(root) and path.is_file() and not path.is_symlink():
+                relative = path.relative_to(root).as_posix()
+                if re.fullmatch(r"[A-Za-z0-9_./-]+\.go", relative):
+                    locations.add((relative, int(line)))
+    return {"categories": sorted(categories) or ["command failure"], "locations": [{"file": name, "line": line} for name, line in sorted(locations)[:50]]}
+
+
+def command_failure(args, result, cwd=None):
+    executable = Path(args[0]).name
+    if any(Path(value).name == "build_go.sh" for value in args[1:]):
+        operation = "CLI build"
+    elif executable in ("go", "git") and len(args) > 1 and args[1] in ("build", "test", "vet", "mod", "list", "apply", "clone", "fetch", "diff", "tool"):
+        operation = executable + " " + args[1]
+    else:
+        operation = executable if executable in ("gofmt", "golangci-lint", "make", "configure") else "build tool"
+    record = {"status": "fail", "operation": operation, "exit_code": result.returncode, **safe_diagnostics(result.stdout + result.stderr, cwd)}
+    if EVIDENCE_DIRECTORY is not None:
+        EVIDENCE_DIRECTORY.mkdir(parents=True, exist_ok=True)
+        (EVIDENCE_DIRECTORY / "command-failure.json").write_bytes(canonical(record))
+    print("Verification failure:", json.dumps(record, sort_keys=True), file=sys.stderr)
+    raise PipelineError("verification command failed: " + operation + " (" + ", ".join(record["categories"]) + ")")
+
+
 def check(condition, message):
     if not condition:
-        raise RuntimeError(message)
+        raise PipelineError(message)
 
 
 def digest(data):
@@ -55,9 +104,8 @@ def run(args, cwd=None, env=None, capture=False, expected=0):
     # Tool failures may include authenticated URLs or remote response text.
     # Never stream them or persist raw diagnostic output in build artifacts.
     result = subprocess.run(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, check=False)
-    command = Path(args[0]).name
-    operation = args[1] if len(args) > 1 and args[1] in ("test", "vet", "mod", "list", "version", "apply", "clone", "fetch", "init", "add", "diff") else ""
-    check(result.returncode == expected, "verification command failed: " + command + " " + operation)
+    if result.returncode != expected:
+        command_failure(args, result, cwd)
     return result.stdout if capture else b""
 
 
@@ -227,7 +275,9 @@ def lint(work, parent):
     formatted = run([go, "tool", "mvdan.cc/gofumpt", "-d", *files], cwd=parent / "coder", env=env, capture=True)
     imports = run([go, "tool", "github.com/daixiang0/gci", "diff", "-s", "standard", "-s", "default", "-s", "Prefix(github.com/coder,cdr.dev/)", *files], cwd=parent / "coder", env=env, capture=True)
     tailscale_format = run([str(work / "toolchains/go/bin/gofmt"), "-l", *changed_go_files("tailscale")], cwd=parent / "tailscale", capture=True)
-    check(not formatted and not imports and not tailscale_format, "changed Go files need repository formatting")
+    check(not formatted, "changed Coder files need gofumpt formatting")
+    check(not imports, "changed Coder imports need gci formatting")
+    check(not tailscale_format, "changed Tailscale files need gofmt formatting")
     directory = work / "tools/bin"
     directory.mkdir(parents=True, exist_ok=True)
     binary = directory / "golangci-lint"
@@ -261,7 +311,7 @@ def run_go_tests(work, parent, args, label):
             # Only source-controlled case identifiers, never raw Output events.
             if re.fullmatch(r"Test[A-Za-z0-9_/.-]+", name) and "secret" not in name.lower():
                 failures.append(name)
-    record = {"label": label, "lock_sha256": digest(locked_bytes()), "source_trees": {name: source["patched_tree"] for name, source in LOCK["sources"].items()}, "status": "pass" if result.returncode == 0 else "fail", "packages": packages, "failed_tests": failures}
+    record = {"label": label, "lock_sha256": digest(locked_bytes()), "source_trees": {name: source["patched_tree"] for name, source in LOCK["sources"].items()}, "status": "pass" if result.returncode == 0 else "fail", "packages": packages, "failed_tests": failures, "diagnostics": safe_diagnostics(result.stderr, parent / "coder") if result.returncode else {}}
     evidence = work / "evidence"
     evidence.mkdir(exist_ok=True)
     (evidence / (label.replace(" ", "-") + ".json")).write_bytes(canonical(record))
@@ -619,6 +669,7 @@ def verify_checksums(output):
 
 
 def main():
+    global EVIDENCE_DIRECTORY
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["refresh", "bootstrap", "assemble", "baseline", "rollback", "lint", "test", "race", "build", "image", "interop", "verify", "all"])
     parser.add_argument("--work", type=Path, default=ROOT.parent / ".build")
@@ -627,6 +678,7 @@ def main():
     parser.add_argument("--source-root", type=Path, default=ROOT.parent, help="reviewed source checkouts for refresh")
     args = parser.parse_args()
     work = args.work.resolve()
+    EVIDENCE_DIRECTORY = work / "evidence"
     work.mkdir(parents=True, exist_ok=True)
     check(all(Path(name).name == name and name not in ("", ".", "..") for name in (args.assembly, args.dist)), "assembly and dist must be directory names")
     parent = work / args.assembly
@@ -674,5 +726,5 @@ if __name__ == "__main__":
         main()
     except (RuntimeError, OSError, ValueError, KeyError) as exc:
         # Do not print exception causes or authenticated network URLs.
-        print("pipeline stopped:", str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__, file=sys.stderr)
+        print("pipeline stopped:", str(exc) if isinstance(exc, PipelineError) else type(exc).__name__, file=sys.stderr)
         sys.exit(1)

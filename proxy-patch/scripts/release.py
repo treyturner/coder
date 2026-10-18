@@ -233,5 +233,5 @@ if __name__ == "__main__":
         main()
     except Exception as error:
         # Signed download URLs, response bodies and authentication never enter logs.
-        print("release delivery stopped:", str(error) if isinstance(error, ReleaseError) else type(error).__name__, file=sys.stderr)
+        print("release delivery stopped:", str(error) if isinstance(error, (ReleaseError, source_run.RunCheckError, publisher.pipeline.PipelineError)) else type(error).__name__, file=sys.stderr)
         sys.exit(1)
