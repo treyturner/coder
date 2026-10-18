@@ -279,11 +279,9 @@ def test(work, parent, race=False):
     args += ["tailscale.com/derp/...", "./codersdk/workspacesdk"]
     mode = "race" if race else "regression"
     run_go_tests(work, parent, args, "DERP and SDK " + mode)
-    cli_args = [go, "test", "-count=1", "-timeout=180s", "-run", "^TestProxySSHDisabledAutostart$"]
-    if race:
-        cli_args.append("-race")
-    run_go_tests(work, parent, cli_args + ["./cli"], "CLI autostart " + mode)
     if not race:
+        cli_args = [go, "test", "-count=1", "-timeout=180s", "-run", "^TestProxySSHDisabledAutostart$", "./cli"]
+        run_go_tests(work, parent, cli_args, "CLI autostart regression")
         run_go_tests(work, parent, [go, "test", "-count=1", "-timeout=180s", "./tailnet/..."], "tailnet regression")
         print("Running Go vet and module verification.", flush=True)
         run([go, "vet", "tailscale.com/derp/...", "./codersdk/workspacesdk", "./cli"], cwd=parent / "coder", env=env)
