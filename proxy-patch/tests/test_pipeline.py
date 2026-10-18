@@ -119,6 +119,25 @@ class PackagingTests(unittest.TestCase):
         for name in ("coder-cli.oci.tar", "sources.tar.gz", "image-digests.json", "SHA256SUMS"):
             self.assertEqual((first / name).read_bytes(), (second / name).read_bytes())
 
+    def test_verification_does_not_recompress_recipe(self):
+        output = self.image()
+        with patch.object(pipeline, "recipe_bytes", side_effect=AssertionError("verification must not recompress")):
+            pipeline.verify_image(output)
+
+    def test_editorial_changes_do_not_invalidate_build_recipe(self):
+        output = self.image()
+        (self.control / "README.md").write_text("An editorial correction.\n")
+        pipeline.verify_image(output)
+
+    def test_recipe_content_is_checked_even_with_updated_recorded_checksum(self):
+        output = self.image()
+        archive = output / "recipe.tar.gz"
+        archive.write_bytes(gzip.compress(gzip.decompress(archive.read_bytes()) + b"unexpected content", mtime=0))
+        (output / "provenance.json").write_bytes(pipeline.canonical(pipeline.expected_provenance(output)))
+        pipeline.checksums(output)
+        with self.assertRaisesRegex(RuntimeError, "build recipe changed"):
+            pipeline.verify_image(output)
+
     def test_stale_binary_rejected_before_packaging(self):
         output = self.payload()
         (output / "coder").write_bytes(b"different binary")

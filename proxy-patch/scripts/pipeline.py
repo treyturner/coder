@@ -27,9 +27,9 @@ LOCK = json.loads(LOCK_BYTES)
 OCI = "application/vnd.oci.image."
 BOOTSTRAPPED = set()
 EVIDENCE_DIRECTORY = None
-RECIPE_FILES = ("README.md", "LICENSE", "Dockerfile", "sources.lock.json", "scripts/pipeline.py",
-                "tests/test_pipeline.py", "tests/baseline_test.go.txt", "tests/oci_validate.go.txt", ".github/workflows/verify.yml",
-                "patches/coder.patch", "patches/tailscale.patch", "docs/PLAN.md")
+RECIPE_FILES = ("BUILD.md", "LICENSE", "Dockerfile", "sources.lock.json", "scripts/pipeline.py",
+                "scripts/ci_packager.py", "ci/packager.json", "tests/test_pipeline.py", "tests/test_diagnostics.py",
+                "tests/baseline_test.go.txt", "tests/oci_validate.go.txt", "patches/coder.patch", "patches/tailscale.patch")
 
 
 class PipelineError(RuntimeError):
@@ -440,7 +440,7 @@ def verify_payload(output):
     check((output / "sources.lock.json").read_bytes() == locked_bytes(), "payload lock differs from reviewed lock")
     recorded = json.loads((output / "provenance.json").read_bytes())
     check(recorded == expected_provenance(output), "payload is not bound to current binary, lock and source trees; rebuild required")
-    check((output / "recipe.tar.gz").read_bytes() == recipe_bytes(), "build recipe changed; rebuild required")
+    check(gzip.decompress((output / "recipe.tar.gz").read_bytes()) == recipe_tar_bytes(), "build recipe changed; rebuild required")
     sbom = json.loads((output / "sbom.cdx.json").read_bytes())
     check(sbom["components"] == effective_components((output / "module-info.txt").read_text()), "SBOM differs from effective binary modules")
 
@@ -646,15 +646,22 @@ def source_archive(parent, output):
                     add_tar(tar, name + "/" + relative, source.read_bytes(), source.stat().st_mode & 0o777)
 
 
-def recipe_bytes():
+def recipe_tar_bytes():
     locked_bytes()
     check(digest(Path(__file__).read_bytes()) == PIPELINE_SHA256, "pipeline source changed during execution")
     stream = io.BytesIO()
-    with gzip.GzipFile(fileobj=stream, mode="wb", filename="", mtime=0) as gz, tarfile.open(fileobj=gz, mode="w|", format=tarfile.PAX_FORMAT) as tar:
+    with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT) as tar:
         for name in sorted(RECIPE_FILES):
             path = ROOT / name
             check(path.is_file() and not path.is_symlink(), "build recipe file missing")
             add_tar(tar, "proxy-patch/" + name, path.read_bytes(), 0o644)
+    return stream.getvalue()
+
+
+def recipe_bytes():
+    stream = io.BytesIO()
+    with gzip.GzipFile(fileobj=stream, mode="wb", filename="", mtime=0) as gz:
+        gz.write(recipe_tar_bytes())
     return stream.getvalue()
 
 
