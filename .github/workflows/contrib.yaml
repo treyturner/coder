@@ -97,6 +97,7 @@ jobs:
 
   cla:
     runs-on: ubuntu-latest
+    if: github.server_url == 'https://github.com' && github.repository == 'coder/coder'
     permissions:
       pull-requests: write
     steps:
