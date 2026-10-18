@@ -168,11 +168,11 @@ jobs:
       - name: Authenticate with existing registry credentials
         env:
           GHCR_TOKEN: ${{ github.token }}
-          FORGEJO_USER: ${{ secrets.FORGEJO_REGISTRY_USERNAME }}
+          FORGEJO_USER: ${{ vars.FORGEJO_REGISTRY_USERNAME }}
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
         run: |
           if [ -z "$FORGEJO_USER" ] || [ -z "$FORGEJO_TOKEN" ]; then
-            echo 'Existing Forgejo registry credentials must be bound before publication.' >&2
+            echo 'Configure the Forgejo registry username variable and token secret before publication.' >&2
             exit 1
           fi
           install -d -m 700 "$DOCKER_CONFIG"
