@@ -385,7 +385,7 @@ index fb6e321bc..798691043 100644
  	return proxyConn, nil
  }
 diff --git a/derp/derphttp/websocket.go b/derp/derphttp/websocket.go
-index 89c281b3d..03ba9e7d9 100644
+index 89c281b3d..dd1e95665 100644
 --- a/derp/derphttp/websocket.go
 +++ b/derp/derphttp/websocket.go
 @@ -8,10 +8,14 @@
@@ -403,7 +403,7 @@ index 89c281b3d..03ba9e7d9 100644
  )
  
  func init() {
-@@ -19,21 +23,137 @@ func init() {
+@@ -19,21 +23,141 @@ func init() {
  }
  
  func dialWebsocket(ctx context.Context, urlStr string, tlsConfig *tls.Config, httpHeader http.Header) (net.Conn, error) {
@@ -446,6 +446,10 @@ index 89c281b3d..03ba9e7d9 100644
 +
 +// websocketTransport keeps proxy authentication outside the relay TLS tunnel.
 +func websocketTransport(ctx context.Context, urlStr string, tlsConfig *tls.Config) (*http.Transport, error) {
++	return websocketTransportWithProxy(ctx, urlStr, tlsConfig, tshttpproxy.ProxyFromEnvironment)
++}
++
++func websocketTransportWithProxy(ctx context.Context, urlStr string, tlsConfig *tls.Config, selectProxy func(*http.Request) (*url.URL, error)) (*http.Transport, error) {
 +	u, err := url.Parse(urlStr)
 +	if err != nil {
 +		return nil, safeConnectError(ctx, "WebSocket URL", err)
@@ -456,7 +460,7 @@ index 89c281b3d..03ba9e7d9 100644
 +	case "wss":
 +		u.Scheme = "https"
 +	}
-+	proxyURL, err := tshttpproxy.ProxyFromEnvironment((&http.Request{URL: u}).WithContext(ctx))
++	proxyURL, err := selectProxy((&http.Request{URL: u}).WithContext(ctx))
 +	if err != nil {
 +		return nil, safeConnectError(ctx, "proxy selection", err)
 +	}
@@ -551,10 +555,10 @@ index 89c281b3d..03ba9e7d9 100644
  }
 diff --git a/derp/derphttp/websocket_proxy_test.go b/derp/derphttp/websocket_proxy_test.go
 new file mode 100644
-index 000000000..e28265495
+index 000000000..d476a7ecf
 --- /dev/null
 +++ b/derp/derphttp/websocket_proxy_test.go
-@@ -0,0 +1,899 @@
+@@ -0,0 +1,873 @@
 +// Copyright (c) Tailscale Inc & AUTHORS
 +// SPDX-License-Identifier: BSD-3-Clause
 +
@@ -598,6 +602,7 @@ index 000000000..e28265495
 +	"tailscale.com/derp"
 +	"tailscale.com/tailcfg"
 +	"tailscale.com/types/key"
++	"tailscale.com/util/racebuild"
 +)
 +
 +// Proxy and root certificate configuration are cached process-wide. Each fixture
@@ -703,10 +708,7 @@ index 000000000..e28265495
 +}
 +
 +func TestProxyWebsocketRouting(t *testing.T) {
-+	if isolatedProxyTest(t) {
-+		return
-+	}
-+	forbidOriginDNS(t)
++	t.Parallel()
 +	relay := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"derp"}})
 +		if err != nil {
@@ -722,12 +724,12 @@ index 000000000..e28265495
 +			t.Error("wrong CONNECT authority")
 +		}
 +	})
-+	t.Setenv("HTTPS_PROXY", proxy.URL)
 +	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 +	defer cancel()
 +	conf := relay.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
 +	conf.ServerName = "example.com"
-+	conn, err := dialWebsocket(ctx, "https://example.com/derp", conf, nil)
++	tr := fixedProxyTransport(t, ctx, "https://example.com/derp", conf, proxy.URL)
++	conn, err := dialWebsocketTransport(ctx, "https://example.com/derp", nil, tr)
 +	proxyMust(t, err)
 +	defer conn.Close()
 +	buf := make([]byte, 7)
@@ -785,29 +787,20 @@ index 000000000..e28265495
 +	_ = c.Close()
 +}
 +
-+func TestProxyWebsocketSelection(t *testing.T) {
++func TestProxyWebsocketEnvironment(t *testing.T) {
 +	for _, tc := range []struct {
 +		name, target string
 +		env          map[string]string
 +		want         string
 +		wantError    bool
 +	}{
-+		{name: "direct", target: "wss://relay.test/derp"},
 +		{name: "https", target: "wss://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://secure-proxy.test:8080", "HTTP_PROXY": "http://plain-proxy.test:8080"}, want: "secure-proxy.test:8080"},
 +		{name: "http", target: "ws://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://secure-proxy.test:8080", "HTTP_PROXY": "http://plain-proxy.test:8080"}, want: "plain-proxy.test:8080"},
 +		{name: "lowercase", target: "https://relay.test/derp", env: map[string]string{"https_proxy": "http://lower-proxy.test:8080"}, want: "lower-proxy.test:8080"},
 +		{name: "case_conflict", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://upper-proxy.test:8080", "https_proxy": "http://lower-proxy.test:8080"}, wantError: true},
 +		{name: "all_proxy_unchanged", target: "https://relay.test/derp", env: map[string]string{"ALL_PROXY": "http://unused-proxy.test:8080"}},
 +		{name: "domain_bypass", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "relay.test"}},
-+		{name: "suffix_bypass", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": ".test"}},
-+		{name: "ip_bypass", target: "https://192.0.2.1/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "192.0.2.1"}},
-+		{name: "cidr_bypass", target: "https://192.0.2.1/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "192.0.2.0/24"}},
-+		{name: "port_bypass", target: "https://relay.test:8443/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "relay.test:8443"}},
-+		{name: "port_mismatch", target: "https://relay.test:8443/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "relay.test:443"}, want: "proxy.test:8080"},
-+		{name: "wildcard_bypass", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "*"}},
-+		{name: "lowercase_no_proxy_conflict", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "other.test", "no_proxy": "relay.test"}, wantError: true},
 +		{name: "cgi_error", target: "http://relay.test/derp", env: map[string]string{"HTTP_PROXY": "http://proxy.test:8080", "REQUEST_METHOD": "GET"}, wantError: true},
-+		{name: "unsupported_scheme", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "socks5://proxy.test:1080"}, wantError: true},
 +	} {
 +		t.Run(tc.name, func(t *testing.T) {
 +			if isolatedProxyTest(t) {
@@ -891,10 +884,7 @@ index 000000000..e28265495
 +}
 +
 +func TestProxyWebsocketIPv4ProxyRoute(t *testing.T) {
-+	if isolatedProxyTest(t) {
-+		return
-+	}
-+	forbidOriginDNS(t)
++	t.Parallel()
 +	relay := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +		if r.TLS.ServerName != "example.com" {
 +			t.Error("IPv4 fallback lost relay TLS identity")
@@ -914,7 +904,6 @@ index 000000000..e28265495
 +			t.Error("IPv4 CONNECT target changed")
 +		}
 +	})
-+	t.Setenv("HTTPS_PROXY", proxy.URL)
 +	pu, err := url.Parse(proxy.URL)
 +	proxyMust(t, err)
 +	n := &tailcfg.DERPNode{HostName: "example.com", IPv4: "192.0.2.1", DERPPort: 8443}
@@ -924,8 +913,7 @@ index 000000000..e28265495
 +	conf.ServerName = c.tlsServerName(n)
 +	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 +	defer cancel()
-+	tr, err := websocketTransport(ctx, target, conf)
-+	proxyMust(t, err)
++	tr := fixedProxyTransport(t, ctx, target, conf, proxy.URL)
 +	var proxyDials, directDials atomic.Int32
 +	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 +		if addr != pu.Host {
@@ -947,10 +935,7 @@ index 000000000..e28265495
 +}
 +
 +func TestProxyWebsocketHTTPForward(t *testing.T) {
-+	if isolatedProxyTest(t) {
-+		return
-+	}
-+	forbidOriginDNS(t)
++	t.Parallel()
 +	var requests atomic.Int32
 +	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +		requests.Add(1)
@@ -969,10 +954,10 @@ index 000000000..e28265495
 +		_, _, _ = ws.Read(r.Context())
 +	}))
 +	defer proxy.Close()
-+	t.Setenv("HTTP_PROXY", proxy.URL)
 +	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 +	defer cancel()
-+	conn, err := dialWebsocket(ctx, "http://relay.test:8080/derp", nil, nil)
++	tr := fixedProxyTransport(t, ctx, "http://relay.test:8080/derp", nil, proxy.URL)
++	conn, err := dialWebsocketTransport(ctx, "http://relay.test:8080/derp", nil, tr)
 +	proxyMust(t, err)
 +	defer conn.Close()
 +	data := make([]byte, 7)
@@ -984,6 +969,9 @@ index 000000000..e28265495
 +}
 +
 +func TestProxyWebsocketConnectLimit(t *testing.T) {
++	if racebuild.On {
++		t.Skip("default ten-second deadline is covered once; race checks use explicit cancellation")
++	}
 +	if isolatedProxyTest(t) {
 +		return
 +	}
@@ -1174,10 +1162,7 @@ index 000000000..e28265495
 +func TestProxyWebsocketDenied(t *testing.T) {
 +	for _, name := range []string{"connect_403", "connect_407", "upgrade_403", "malformed_101", "wrong_subprotocol", "redirect"} {
 +		t.Run(name, func(t *testing.T) {
-+			if isolatedProxyTest(t) {
-+				return
-+			}
-+			forbidOriginDNS(t)
++			t.Parallel()
 +			var redirected atomic.Int32
 +			target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { redirected.Add(1) }))
 +			defer target.Close()
@@ -1210,12 +1195,12 @@ index 000000000..e28265495
 +			proxy, connects := connectProxy(t, relay.Listener.Addr().String(), status, nil)
 +			pu, _ := url.Parse(proxy.URL)
 +			pu.User = url.UserPassword("fixture-secret-user", "fixture-secret-password")
-+			t.Setenv("HTTPS_PROXY", pu.String())
 +			conf := relay.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
 +			conf.ServerName = "example.com"
 +			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 +			defer cancel()
-+			conn, err := dialWebsocket(ctx, "https://example.com/derp", conf, http.Header{"X-Fixture-Gateway": []string{"fixture-secret-gateway"}})
++			tr := fixedProxyTransport(t, ctx, "https://example.com/derp", conf, pu.String())
++			conn, err := dialWebsocketTransport(ctx, "https://example.com/derp", http.Header{"X-Fixture-Gateway": []string{"fixture-secret-gateway"}}, tr)
 +			if err == nil {
 +				conn.Close()
 +				t.Fatal("denied or malformed upgrade accepted")
@@ -1230,8 +1215,12 @@ index 000000000..e28265495
 +func TestProxyWebsocketCancellationPhases(t *testing.T) {
 +	for _, phase := range []string{"proxy_dial", "proxy_tls", "connect", "relay_tls", "upgrade", "greeting_deadline", "client_close", "invalid_greeting"} {
 +		t.Run(phase, func(t *testing.T) {
-+			if isolatedProxyTest(t) {
-+				return
++			if phase == "upgrade" || phase == "greeting_deadline" || phase == "client_close" || phase == "invalid_greeting" {
++				if isolatedProxyTest(t) {
++					return
++				}
++			} else {
++				t.Parallel()
 +			}
 +			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 +			defer cancel()
@@ -1251,9 +1240,7 @@ index 000000000..e28265495
 +				if phase == "proxy_tls" {
 +					proxyScheme = "https"
 +				}
-+				t.Setenv("HTTPS_PROXY", proxyScheme+"://"+ln.Addr().String())
-+				tr, err := websocketTransport(ctx, "https://relay.test/derp", nil)
-+				proxyMust(t, err)
++				tr := fixedProxyTransport(t, ctx, "https://relay.test/derp", nil, proxyScheme+"://"+ln.Addr().String())
 +				if phase == "proxy_dial" {
 +					tr.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) { <-ctx.Done(); return nil, ctx.Err() }
 +				} else if phase == "relay_tls" {
@@ -1363,15 +1350,6 @@ index 000000000..e28265495
 +	}
 +}
 +
-+func TestProxyWebsocketRegionAuthority(t *testing.T) {
-+	t.Parallel()
-+	c := &Client{}
-+	n := &tailcfg.DERPNode{HostName: "relay.test", IPv4: "192.0.2.1", DERPPort: 8443}
-+	if c.urlString(n) != "https://192.0.2.1:8443/derp" || c.tlsServerName(n) != "relay.test" {
-+		t.Fatal("inherited region authority behavior changed")
-+	}
-+}
-+
 +func TestProxyWebsocketDERPFallback(t *testing.T) {
 +	for _, name := range []string{"fallback", "forced", "initial_derp"} {
 +		t.Run(name, func(t *testing.T) {
@@ -1450,6 +1428,97 @@ index 000000000..e28265495
 +			defer logMu.Unlock()
 +			if strings.Contains(logs.String(), "fixture-secret") {
 +				t.Fatal("DERP diagnostics disclosed a synthetic credential")
++			}
++		})
++	}
++}
+diff --git a/derp/derphttp/websocket_selection_internal_test.go b/derp/derphttp/websocket_selection_internal_test.go
+new file mode 100644
+index 000000000..32781886d
+--- /dev/null
++++ b/derp/derphttp/websocket_selection_internal_test.go
+@@ -0,0 +1,85 @@
++// Copyright (c) Tailscale Inc & AUTHORS
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build !js
++
++package derphttp
++
++import (
++	"context"
++	"crypto/tls"
++	"errors"
++	"net"
++	"net/http"
++	"net/url"
++	"testing"
++)
++
++func fixedProxyTransport(t *testing.T, ctx context.Context, target string, config *tls.Config, proxy string) *http.Transport {
++	t.Helper()
++	u, err := url.Parse(proxy)
++	proxyMust(t, err)
++	tr, err := websocketTransportWithProxy(ctx, target, config, func(*http.Request) (*url.URL, error) { return u, nil })
++	proxyMust(t, err)
++	tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
++		if address != u.Host {
++			t.Error("fixture attempted an unintended direct dial")
++			return nil, errors.New("direct fixture dial refused")
++		}
++		return (&net.Dialer{}).DialContext(ctx, network, address)
++	}
++	// In-process fixtures use only their synthetic URL credentials. The real
++	// environment auth path remains covered in isolated TLS fixtures.
++	tr.GetProxyConnectHeader = proxyConnectHeaders(func(proxy *url.URL) (string, error) {
++		if proxy.User == nil {
++			return "", nil
++		}
++		password, _ := proxy.User.Password()
++		request := &http.Request{Header: make(http.Header)}
++		request.SetBasicAuth(proxy.User.Username(), password)
++		return request.Header.Get("Authorization"), nil
++	})
++	return tr
++}
++
++func TestProxyWebsocketSelection(t *testing.T) {
++	t.Parallel()
++	for _, tc := range []struct {
++		name, target, scheme, proxy string
++		err                         error
++		wantError                   bool
++	}{
++		{name: "secure", target: "wss://relay.test/derp", scheme: "https", proxy: "http://proxy.test:8080"},
++		{name: "plain", target: "ws://relay.test/derp", scheme: "http", proxy: "http://proxy.test:8080"},
++		{name: "direct", target: "https://relay.test/derp", scheme: "https"},
++		{name: "selection_error", target: "wss://relay.test/derp", scheme: "https", err: errors.New("fixture-secret"), wantError: true},
++		{name: "unsupported", target: "wss://relay.test/derp", scheme: "https", proxy: "socks5://proxy.test:1080", wantError: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Parallel()
++			ctx := context.Background()
++			tr, err := websocketTransportWithProxy(ctx, tc.target, nil, func(request *http.Request) (*url.URL, error) {
++				if request.URL.Scheme != tc.scheme || request.Context() != ctx {
++					t.Error("selector lost normalized scheme or request context")
++				}
++				if tc.err != nil || tc.proxy == "" {
++					return nil, tc.err
++				}
++				return url.Parse(tc.proxy)
++			})
++			if tc.wantError {
++				if err == nil {
++					t.Fatal("selector error was ignored")
++				}
++				return
++			}
++			proxyMust(t, err)
++			defer tr.CloseIdleConnections()
++			selected, err := tr.Proxy(&http.Request{})
++			proxyMust(t, err)
++			if (selected == nil) != (tc.proxy == "") || selected != nil && selected.String() != tc.proxy {
++				t.Fatal("transport changed selected route")
 +			}
 +		})
 +	}

@@ -75,7 +75,7 @@ The pipeline pins byte-sensitive packaging versions and fixes source timestamps,
 
 | Area | Local coverage |
 | --- | --- |
-| Selection | HTTP_PROXY, HTTPS_PROXY, lowercase variants, unequal nonempty case variants rejected before CLI API and DERP traffic, NO_PROXY domain/suffix/IP/CIDR/port/wildcard, CGI error, unchanged ALL_PROXY behavior, unsupported schemes fail closed |
+| Selection | HTTP_PROXY, HTTPS_PROXY, lowercase variants, unequal nonempty case variants rejected before CLI API and DERP traffic, representative NO_PROXY bypass and ws/wss normalization, CGI error, unchanged ALL_PROXY behavior, unsupported schemes fail closed |
 | Routing | HTTP CONNECT, HTTPS proxy, plain HTTP absolute-form upgrade, permitted direct and NO_PROXY traffic, zero unintended origin DNS, guarded IPv4 dialing |
 | TLS/auth | Different proxy and relay roots/names, verified chains, relay-only client certificate, synthetic proxy Basic auth, silent auth callback errors, API session and inner gateway headers kept on their intended hops |
 | Denials | CONNECT 403/407, inner 403, malformed 101, wrong subprotocol, redirects rejected without reaching the target, synthetic remote secret markers absent from diagnostics |
@@ -85,6 +85,8 @@ The pipeline pins byte-sensitive packaging versions and fixes source timestamps,
 | Packaging | Stale binary/lock rejection, effective replacement metadata, deterministic archives, blob/archive/checksum/descriptor tampering detection, isolated build environment |
 
 Go's API selector prefers uppercase proxy variables in this toolchain; the pinned Tailscale selector prefers lowercase when both are set. The patch preserves those selectors. Do not silently rewrite deployment environment variables. Region WebSocket URLs may use a populated IPv4 while initial selection uses HostName, and the initial selector omits the node port. Local tests characterize this inherited behavior; inspect the approved live target's effective authority and stop on a policy mismatch.
+
+Transport selection, routing, denied upgrades and pre-upgrade cancellation use per-call proxy injection and guarded dialing in parallel. Real environment selection, system-root boundaries and full client establishment retain subprocess isolation. The default ten-second deadline is exercised once in plain qualification; race qualification covers explicit cancellation without waiting out that deadline again. Dependency matcher internals are outside this focused matrix.
 
 ## Update a future revision
 

@@ -18,9 +18,9 @@
       "commit": "b7c5fc6e639929414866313e40a587d9c341117d",
       "original_replacement": "github.com/coder/tailscale v1.1.1-0.20260529105257-b7c5fc6e6399",
       "base_tree": "8937c993c01a95b0596d9401ddef7b05201175f7",
-      "patched_tree": "26966bbaecd5c069d123ee37a2bcfeddb6492cdc",
+      "patched_tree": "35fa9cea31cb77ed187130dc8e584152f779b15e",
       "patch": "patches/tailscale.patch",
-      "patch_sha256": "c70521fa35678108d4f19b5deedfca8c3e7add2b3f4b026719268b249c9680b2"
+      "patch_sha256": "9a0bf60e49511dc0facfc24ca616cf01fc3a83106fe9f2e5653e133487f8455f"
     }
   },
   "go": {
