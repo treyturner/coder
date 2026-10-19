@@ -1,0 +1,452 @@
+diff --git a/cli/proxy_environment_internal_test.go b/cli/proxy_environment_internal_test.go
+new file mode 100644
+index 000000000..9c9a2dafb
+--- /dev/null
++++ b/cli/proxy_environment_internal_test.go
+@@ -0,0 +1,37 @@
++package cli
++
++import (
++	"context"
++	"os"
++	"os/exec"
++	"strings"
++	"testing"
++
++	"github.com/coder/coder/v2/testutil"
++)
++
++func TestProxyCLIEnvironmentGuard(t *testing.T) {
++	t.Parallel()
++	if os.Getenv("CODER_PROXY_ENV_FIXTURE") == "1" {
++		// The client must fail before headers, version checks, or API dialing.
++		_, err := (&RootCmd{}).createHTTPClient(context.Background(), nil, nil)
++		if err == nil || !strings.Contains(err.Error(), "conflicting proxy environment") || strings.Contains(err.Error(), "fixture-secret") {
++			t.Fatal("client configuration did not reject ambiguous proxy settings safely")
++		}
++		return
++	}
++	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"} {
++		t.Run(name, func(t *testing.T) {
++			t.Parallel()
++			ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
++			defer cancel()
++			//nolint:gosec // This binary and constant selectors are test-controlled.
++			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProxyCLIEnvironmentGuard$", "-test.timeout=10s")
++			cmd.Env = []string{"CODER_PROXY_ENV_FIXTURE=1", "GOTRACEBACK=none", name + "=fixture-secret-upper", strings.ToLower(name) + "=fixture-secret-lower"}
++			output, err := cmd.CombinedOutput()
++			if err != nil || strings.Contains(string(output), "fixture-secret") {
++				t.Fatal("isolated CLI proxy guard failed or disclosed a setting")
++			}
++		})
++	}
++}
+diff --git a/cli/root.go b/cli/root.go
+index 747e01f97..291c1404a 100644
+--- a/cli/root.go
++++ b/cli/root.go
+@@ -31,6 +31,7 @@ import (
+ 	"github.com/mitchellh/go-wordwrap"
+ 	"golang.org/x/mod/semver"
+ 	"golang.org/x/xerrors"
++	"tailscale.com/net/tshttpproxy"
+ 
+ 	"github.com/coder/coder/v2/buildinfo"
+ 	"github.com/coder/coder/v2/cli/cliui"
+@@ -882,6 +883,9 @@ func (r *RootCmd) createHTTPClient(ctx context.Context, serverURL *url.URL, inv
+ }
+ 
+ func newHTTPTransport(tlsConfig *tls.Config) (http.RoundTripper, error) {
++	if err := tshttpproxy.CheckProxyEnvironment(); err != nil {
++		return nil, xerrors.Errorf("proxy configuration: %w", err)
++	}
+ 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+ 	if !ok {
+ 		if tlsConfig != nil {
+diff --git a/cli/ssh_proxy_test.go b/cli/ssh_proxy_test.go
+new file mode 100644
+index 000000000..c5bef604f
+--- /dev/null
++++ b/cli/ssh_proxy_test.go
+@@ -0,0 +1,81 @@
++package cli_test
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"os"
++	"os/exec"
++	"strings"
++	"sync/atomic"
++	"testing"
++
++	"github.com/coder/coder/v2/cli/clitest"
++	"github.com/coder/coder/v2/codersdk"
++	"github.com/coder/coder/v2/testutil"
++)
++
++func TestProxySSHDisabledAutostart(t *testing.T) {
++	t.Parallel()
++	if os.Getenv("CODER_PROXY_CLI_FIXTURE") != "1" {
++		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
++		defer cancel()
++		//nolint:gosec // This binary and constant selectors are test-controlled.
++		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProxySSHDisabledAutostart$", "-test.timeout=30s")
++		cmd.Env = []string{"CODER_PROXY_CLI_FIXTURE=1", "GOTRACEBACK=none"}
++		out, err := cmd.CombinedOutput()
++		if strings.Contains(string(out), "fixture-secret") {
++			t.Fatal("synthetic credential escaped the CLI fixture")
++		}
++		if err != nil {
++			t.Fatalf("isolated CLI fixture failed: %s", out)
++		}
++		return
++	}
++	var lookups, mutations atomic.Int32
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodGet {
++			mutations.Add(1)
++			w.WriteHeader(http.StatusMethodNotAllowed)
++			return
++		}
++		if r.Header.Get(codersdk.SessionTokenHeader) != "fixture-secret-session" {
++			t.Error("CLI fixture missing session authentication")
++		}
++		w.Header().Set("Content-Type", "application/json")
++		switch r.URL.Path {
++		case "/api/v2/appearance":
++			_ = json.NewEncoder(w).Encode(codersdk.AppearanceConfig{})
++		case "/api/v2/users/fixture/workspace/fixture":
++			lookups.Add(1)
++			_ = json.NewEncoder(w).Encode(codersdk.Workspace{Name: "fixture", LatestBuild: codersdk.WorkspaceBuild{
++				Transition: codersdk.WorkspaceTransitionStop, Status: codersdk.WorkspaceStatusStopped,
++			}})
++		default:
++			t.Error("unexpected CLI fixture API request")
++			w.WriteHeader(http.StatusNotFound)
++		}
++	}))
++	defer server.Close()
++	u, err := url.Parse(server.URL)
++	if err != nil {
++		t.Fatal("invalid local fixture URL")
++	}
++	client := codersdk.New(u, codersdk.WithSessionToken("fixture-secret-session"))
++	inv, root := clitest.New(t, "--disable-direct-connections", "ssh", "--disable-autostart", "--wait=no", "fixture/fixture", "--", "id", "-un")
++	clitest.SetupConfig(t, client, root)
++	var output bytes.Buffer
++	inv.Stdout, inv.Stderr = &output, &output
++	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitShort)
++	defer cancel()
++	err = inv.WithContext(ctx).Run()
++	if err == nil || !strings.Contains(err.Error(), "workspace must be started") || lookups.Load() != 1 || mutations.Load() != 0 {
++		t.Fatal("disabled autostart did not reject the stopped workspace without mutations")
++	}
++	if strings.Contains(output.String(), "fixture-secret") || strings.Contains(err.Error(), "fixture-secret") {
++		t.Error("CLI fixture disclosed synthetic authentication")
++	}
++}
+diff --git a/codersdk/workspacesdk/proxy_integration_test.go b/codersdk/workspacesdk/proxy_integration_test.go
+new file mode 100644
+index 000000000..0266ae9a3
+--- /dev/null
++++ b/codersdk/workspacesdk/proxy_integration_test.go
+@@ -0,0 +1,268 @@
++package workspacesdk_test
++
++import (
++	"bufio"
++	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"encoding/json"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"net/netip"
++	"net/url"
++	"os"
++	"os/exec"
++	"strconv"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/google/uuid"
++	"golang.org/x/crypto/ssh"
++	"golang.org/x/xerrors"
++	"tailscale.com/derp"
++	"tailscale.com/tailcfg"
++	"tailscale.com/types/key"
++
++	"cdr.dev/slog/v3"
++	"github.com/coder/coder/v2/codersdk"
++	"github.com/coder/coder/v2/codersdk/workspacesdk"
++	"github.com/coder/coder/v2/tailnet"
++	"github.com/coder/coder/v2/tailnet/proto"
++	"github.com/coder/coder/v2/testutil"
++	"github.com/coder/websocket"
++)
++
++func proxyFixtureMust(t *testing.T, err error) {
++	t.Helper()
++	if err != nil {
++		t.Fatalf("local proxy fixture operation failed (%T)", err)
++	}
++}
++
++// The child has no inherited credentials or proxy configuration. A fresh process
++// also isolates the proxy selector's environment cache and the DNS guard.
++func TestProxySSHThroughHTTPProxy(t *testing.T) {
++	if os.Getenv("CODER_PROXY_SSH_FIXTURE") != "1" {
++		t.Parallel()
++		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
++		defer cancel()
++		//nolint:gosec // This binary and constant selectors are test-controlled.
++		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProxySSHThroughHTTPProxy$", "-test.timeout=45s")
++		cmd.Env = []string{"CODER_PROXY_SSH_FIXTURE=1", "GOTRACEBACK=none"}
++		out, err := cmd.CombinedOutput()
++		if strings.Contains(string(out), "fixture-secret") {
++			t.Fatal("synthetic credential escaped the local fixture")
++		}
++		if err != nil {
++			t.Fatalf("isolated SSH fixture failed: %s", out)
++		}
++		return
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
++	defer cancel()
++	var dnsAttempts, proxyRequests, derpDenials, derpWebsockets, coordinateRequests atomic.Int32
++	net.DefaultResolver = &net.Resolver{PreferGo: true, Dial: func(context.Context, string, string) (net.Conn, error) {
++		dnsAttempts.Add(1)
++		return nil, xerrors.New("fixture forbids origin DNS")
++	}}
++	logger := slog.Logger{}
++	coord := tailnet.NewCoordinator(logger)
++	defer coord.Close()
++	var coordPtr atomic.Pointer[tailnet.Coordinator]
++	coordPtr.Store(&coord)
++	region := &tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{1: {
++		RegionID: 1, RegionCode: "fixture", Nodes: []*tailcfg.DERPNode{{Name: "fixture", RegionID: 1, HostName: "example.com", STUNPort: -1}},
++	}}}
++	svc, err := tailnet.NewClientService(tailnet.ClientServiceOptions{
++		Logger: logger, CoordPtr: &coordPtr, DERPMapUpdateFrequency: time.Hour,
++		DERPMapFn:           func() *tailcfg.DERPMap { return region },
++		ResumeTokenProvider: tailnet.NewInsecureTestResumeTokenProvider(),
++	})
++	proxyFixtureMust(t, err)
++	relay := derp.NewServer(key.NewNode(), func(string, ...any) {})
++	defer relay.Close()
++	mux := http.NewServeMux()
++	mux.HandleFunc("/derp", func(w http.ResponseWriter, r *http.Request) {
++		if r.Header.Get(codersdk.SessionTokenHeader) != "" || r.Header.Get("Proxy-Authorization") != "" || r.Header.Get("X-Fixture-Gateway") != "fixture-secret-gateway" {
++			t.Error("DERP credential boundary violated")
++		}
++		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
++			derpDenials.Add(1)
++			w.WriteHeader(http.StatusForbidden)
++			_, _ = io.WriteString(w, "fixture-secret-denial")
++			return
++		}
++		derpWebsockets.Add(1)
++		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"derp"}})
++		if err != nil {
++			t.Error("DERP WebSocket upgrade failed")
++			return
++		}
++		defer ws.CloseNow()
++		nc := websocket.NetConn(ctx, ws, websocket.MessageBinary)
++		relay.Accept(ctx, nc, bufio.NewReadWriter(bufio.NewReader(nc), bufio.NewWriter(nc)), r.RemoteAddr)
++	})
++	mux.HandleFunc("/derp/latency-check", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
++	mux.HandleFunc("/api/v2/workspaceagents/", func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodGet || r.Header.Get(codersdk.SessionTokenHeader) != "fixture-secret-session" {
++			t.Error("unexpected API method or missing session authentication")
++			w.WriteHeader(http.StatusForbidden)
++			return
++		}
++		if strings.HasSuffix(r.URL.Path, "/connection") {
++			w.Header().Set("Content-Type", "application/json")
++			_ = json.NewEncoder(w).Encode(workspacesdk.AgentConnectionInfo{DERPMap: region, DisableDirectConnections: true})
++			return
++		}
++		if !strings.HasSuffix(r.URL.Path, "/coordinate") {
++			t.Error("unexpected fixture API path")
++			w.WriteHeader(http.StatusNotFound)
++			return
++		}
++		coordinateRequests.Add(1)
++		ws, err := websocket.Accept(w, r, nil)
++		if err != nil {
++			t.Error("coordination upgrade failed")
++			return
++		}
++		defer ws.CloseNow()
++		wsCtx, nc := codersdk.WebsocketNetConn(ctx, ws, websocket.MessageBinary)
++		_ = svc.ServeConnV2(wsCtx, nc, tailnet.StreamID{ID: uuid.New(), Name: "fixture-client", Auth: tailnet.SingleTailnetCoordinateeAuth{}})
++	})
++	server := httptest.NewTLSServer(mux)
++	defer server.Close()
++	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		proxyRequests.Add(1)
++		if r.Method != http.MethodConnect || r.RequestURI != "example.com:443" || r.Header.Get(codersdk.SessionTokenHeader) != "" || r.Header.Get("X-Fixture-Gateway") != "" {
++			t.Error("proxy request authority or credential boundary violated")
++			w.WriteHeader(http.StatusForbidden)
++			return
++		}
++		up, err := net.DialTimeout("tcp", server.Listener.Addr().String(), time.Second)
++		if err != nil {
++			t.Error("fixture proxy upstream unavailable")
++			return
++		}
++		defer up.Close()
++		down, rw, err := w.(http.Hijacker).Hijack()
++		if err != nil {
++			t.Error("fixture proxy hijack failed")
++			return
++		}
++		defer down.Close()
++		_, _ = io.WriteString(rw, "HTTP/1.1 200 Connection Established\r\n\r\n")
++		_ = rw.Flush()
++		done := make(chan struct{})
++		go func() { _, _ = io.Copy(up, rw); _ = up.Close(); close(done) }()
++		_, _ = io.Copy(down, up)
++		_ = down.Close()
++		<-done
++	}))
++	defer proxy.Close()
++	t.Setenv("HTTPS_PROXY", proxy.URL)
++	tlsConfig := server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
++	tlsConfig.ServerName = "example.com"
++	agentID := uuid.New()
++	addr := tailnet.TailscaleServicePrefix.AddrFromUUID(agentID)
++	headers := http.Header{"X-Fixture-Gateway": []string{"fixture-secret-gateway"}}
++	agent, err := tailnet.NewConn(&tailnet.Options{ID: agentID, Addresses: []netip.Prefix{netip.PrefixFrom(addr, 128)}, DERPMap: region, DERPTLSConfig: tlsConfig, DERPHeader: &headers, BlockEndpoints: true, Logger: logger})
++	proxyFixtureMust(t, err)
++	defer agent.Close()
++	requests, responses := coord.Coordinate(ctx, agentID, "fixture-agent", tailnet.SingleTailnetCoordinateeAuth{})
++	agent.SetNodeCallback(func(n *tailnet.Node) {
++		pn, err := tailnet.NodeToProto(n)
++		if err != nil {
++			t.Error("fixture node conversion failed")
++			return
++		}
++		select {
++		case requests <- &proto.CoordinateRequest{UpdateSelf: &proto.CoordinateRequest_UpdateSelf{Node: pn}}:
++		case <-ctx.Done():
++		}
++	})
++	defer agent.SetNodeCallback(nil)
++	go func() {
++		for {
++			select {
++			case response, ok := <-responses:
++				if !ok {
++					return
++				}
++				_ = agent.UpdatePeers(response.PeerUpdates)
++			case <-ctx.Done():
++				return
++			}
++		}
++	}()
++	// Use the same SSH port as the built-in workspace agent.
++	ln, err := agent.Listen("tcp", ":"+strconv.Itoa(int(workspacesdk.AgentSSHPort)))
++	proxyFixtureMust(t, err)
++	defer ln.Close()
++	sshKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	proxyFixtureMust(t, err)
++	signer, err := ssh.NewSignerFromKey(sshKey)
++	proxyFixtureMust(t, err)
++	config := &ssh.ServerConfig{NoClientAuth: true}
++	config.AddHostKey(signer)
++	go func() {
++		conn, err := ln.Accept()
++		if err != nil {
++			return
++		}
++		defer conn.Close()
++		sconn, channels, reqs, err := ssh.NewServerConn(conn, config)
++		if err != nil {
++			t.Error("local SSH handshake failed")
++			return
++		}
++		defer sconn.Close()
++		go ssh.DiscardRequests(reqs)
++		for next := range channels {
++			channel, requests, err := next.Accept()
++			if err != nil {
++				return
++			}
++			for request := range requests {
++				var command struct{ Command string }
++				if request.Type != "exec" || ssh.Unmarshal(request.Payload, &command) != nil || command.Command != "id -un" {
++					_ = request.Reply(false, nil)
++					continue
++				}
++				_ = request.Reply(true, nil)
++				_, _ = io.WriteString(channel, "fixture-user\n")
++				_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
++				_ = channel.Close()
++				return
++			}
++		}
++	}()
++	apiURL, _ := url.Parse("https://example.com")
++	transport := server.Client().Transport.(*http.Transport).Clone()
++	transport.Proxy = http.ProxyFromEnvironment
++	transport.TLSClientConfig = tlsConfig
++	defer transport.CloseIdleConnections()
++	client := codersdk.New(apiURL, codersdk.WithSessionToken("fixture-secret-session"), codersdk.WithHTTPClient(&http.Client{Transport: &codersdk.HeaderTransport{Transport: transport, Header: headers}}), codersdk.WithDERPTLSConfig(tlsConfig), codersdk.WithDisableDirectConnections())
++	conn, err := workspacesdk.New(client).DialAgent(ctx, agentID, &workspacesdk.DialAgentOptions{BlockEndpoints: true})
++	proxyFixtureMust(t, err)
++	defer func() { cancel(); _ = conn.Close() }()
++	sshClient, err := conn.SSHClient(ctx)
++	proxyFixtureMust(t, err)
++	defer sshClient.Close()
++	session, err := sshClient.NewSession()
++	proxyFixtureMust(t, err)
++	defer session.Close()
++	output, err := session.Output("id -un")
++	proxyFixtureMust(t, err)
++	if string(output) != "fixture-user\n" || dnsAttempts.Load() != 0 || derpDenials.Load() < 2 || derpWebsockets.Load() < 2 || coordinateRequests.Load() == 0 || proxyRequests.Load() < 5 {
++		t.Fatal("SSH output, fallback, proxy routing or authentication evidence incomplete")
++	}
++	if len(agent.Node().Endpoints) != 0 || len(conn.TailnetConn().Node().Endpoints) != 0 {
++		t.Fatal("direct peer endpoints were advertised")
++	}
++	cancel()
++}
+diff --git a/go.mod b/go.mod
+index 03d70be20..c59afbed8 100644
+--- a/go.mod
++++ b/go.mod
+@@ -36,7 +36,7 @@ replace github.com/tcnksm/go-httpstat => github.com/coder/go-httpstat v0.0.0-202
+ 
+ // There are a few minor changes we make to Tailscale that we're slowly upstreaming. Compare here:
+ // https://github.com/tailscale/tailscale/compare/main...coder:tailscale:main
+-replace tailscale.com => github.com/coder/tailscale v1.1.1-0.20260529105257-b7c5fc6e6399
++replace tailscale.com => ../tailscale
+ 
+ // This is replaced to include
+ // 1. a fix for a data race: c.f. https://github.com/tailscale/wireguard-go/pull/25
+diff --git a/tailnet/conn_test.go b/tailnet/conn_test.go
+index b2c9cd575..18ce7acf2 100644
+--- a/tailnet/conn_test.go
++++ b/tailnet/conn_test.go
+@@ -162,7 +162,7 @@ func TestTailnet(t *testing.T) {
+ 		node := <-nodes
+ 		require.Len(t, node.DERPForcedWebsocket, 1)
+ 		// Ensure the reason is valid!
+-		require.Equal(t, `GET failed with status code 400 (a proxy could be disallowing the use of 'Upgrade: derp'): Invalid "Upgrade" header: DERP`, node.DERPForcedWebsocket[derpMap.RegionIDs()[0]])
++		require.Equal(t, `GET failed with status code 400 (a proxy could be disallowing the use of 'Upgrade: derp')`, node.DERPForcedWebsocket[derpMap.RegionIDs()[0]])
+ 	})
+ 
+ 	t.Run("PingDirect", func(t *testing.T) {

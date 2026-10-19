@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "version": "2.37.4+proxyfix.1.1d24629",
+  "base_version": "2.37.4",
+  "patch_revision": "proxyfix.1",
+  "source_date_epoch": 1790794832,
+  "sources": {
+    "coder": {
+      "url": "https://github.com/coder/coder.git",
+      "commit": "1d246291a8a6ae1948b8c825ee252f6a46bfd561",
+      "base_tree": "76e7b86ddb72651e2c98bcb09e0a13a29a12bff2",
+      "patched_tree": "15464ec1d1f034aa801384b5d2d31b749c113aef",
+      "patch": "patches/coder.patch",
+      "patch_sha256": "615c13dfabd7277b8a804d791cfee3776afee4e7f66fa8d5d2765d61f3271880"
+    },
+    "tailscale": {
+      "url": "https://github.com/coder/tailscale.git",
+      "commit": "b7c5fc6e639929414866313e40a587d9c341117d",
+      "original_replacement": "github.com/coder/tailscale v1.1.1-0.20260529105257-b7c5fc6e6399",
+      "base_tree": "8937c993c01a95b0596d9401ddef7b05201175f7",
+      "patched_tree": "35fa9cea31cb77ed187130dc8e584152f779b15e",
+      "patch": "patches/tailscale.patch",
+      "patch_sha256": "9a0bf60e49511dc0facfc24ca616cf01fc3a83106fe9f2e5653e133487f8455f"
+    }
+  },
+  "go": {
+    "version": "go1.26.5",
+    "filename": "go1.26.5.linux-amd64.tar.gz",
+    "url": "https://go.dev/dl/go1.26.5.linux-amd64.tar.gz",
+    "sha256": "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053"
+  },
+  "packager": {
+    "python": "3.14.4",
+    "zlib": "1.3.1"
+  },
+  "lint": {
+    "module": "github.com/golangci/golangci-lint/v2/cmd/golangci-lint",
+    "version": "v2.0.2"
+  },
+  "rollback": {
+    "filename": "coder_2.37.4_linux_amd64.tar.gz",
+    "url": "https://github.com/coder/coder/releases/download/v2.37.4/coder_2.37.4_linux_amd64.tar.gz",
+    "sha256": "e7bb6c08d7a37fd61c8a8b1d65c612fa6b84dc95a23f1e87c0e8440037ecb12c",
+    "checksums_url": "https://github.com/coder/coder/releases/download/v2.37.4/coder_2.37.4_checksums.txt",
+    "checksums_sha256": "b847ffecfbb42cea53c0353758eaf388436325ba525b58dae7faf64f1160b0f0"
+  },
+  "modules": {
+    "github.com/coder/websocket": "v1.8.14",
+    "golang.org/x/net": "v0.58.0"
+  },
+  "platform": {
+    "os": "linux",
+    "architecture": "amd64"
+  },
+  "runtime": {
+    "registry": "gcr.io",
+    "repository": "distroless/static",
+    "index_digest": "sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3",
+    "manifest_digest": "sha256:2293b36c7c9082bf4115aab724b4d2cddec82c8eba39bf27ac0517e159acf150"
+  }
+}

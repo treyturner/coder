@@ -1,0 +1,1615 @@
+diff --git a/derp/derphttp/connection_proxy_internal_test.go b/derp/derphttp/connection_proxy_internal_test.go
+new file mode 100644
+index 000000000..6149dc9b2
+--- /dev/null
++++ b/derp/derphttp/connection_proxy_internal_test.go
+@@ -0,0 +1,82 @@
++// Copyright (c) Tailscale Inc & AUTHORS
++// SPDX-License-Identifier: BSD-3-Clause
++
++package derphttp
++
++import (
++	"context"
++	"crypto/tls"
++	"crypto/x509"
++	"errors"
++	"fmt"
++	"net"
++	"os"
++	"strings"
++	"sync"
++	"syscall"
++	"testing"
++	"time"
++
++	"tailscale.com/tailcfg"
++	"tailscale.com/types/key"
++)
++
++func TestProxyConnectionDiagnostics(t *testing.T) {
++	t.Parallel()
++	for _, tc := range []struct {
++		name string
++		err  error
++		want string
++	}{
++		{"TLS wrapper", &tls.CertificateVerificationError{Err: errors.New("fixture-secret")}, "TLS verification"},
++		{"unknown authority", x509.UnknownAuthorityError{}, "TLS verification"},
++		{"hostname", x509.HostnameError{Host: "fixture-secret"}, "TLS verification"},
++		{"invalid certificate", x509.CertificateInvalidError{}, "TLS verification"},
++		{"DNS", &net.DNSError{Name: "fixture-secret", Err: "fixture-secret"}, "DNS"},
++		{"refused", syscall.ECONNREFUSED, "connection refused"},
++		{"deadline", os.ErrDeadlineExceeded, "timeout"},
++		{"unknown", errors.New("fixture-secret"), "proxy dial failed"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Parallel()
++			err := safeConnectError(context.Background(), "proxy dial", fmt.Errorf("fixture-secret: %w", tc.err))
++			if !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "fixture-secret") {
++				t.Fatal("safe diagnostic category missing or underlying text disclosed")
++			}
++		})
++	}
++}
++
++func TestProxyConnectionDeadlineRetainsCategory(t *testing.T) {
++	t.Parallel()
++	ctx, cancel := context.WithDeadline(context.Background(), time.Unix(1, 0))
++	defer cancel()
++	err := safeConnectError(ctx, "proxy dial", &net.DNSError{Name: "fixture-secret"})
++	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "DNS") || strings.Contains(err.Error(), "fixture-secret") {
++		t.Fatal("deadline lost identity or safe cause category")
++	}
++}
++
++func TestProxyConnectionRegionDiagnostic(t *testing.T) {
++	t.Parallel()
++	region := &tailcfg.DERPRegion{RegionID: 17, RegionCode: "fixture-secret"}
++	var logMu sync.Mutex
++	var logs strings.Builder
++	c := NewRegionClient(key.NewNode(), func(format string, args ...any) {
++		logMu.Lock()
++		defer logMu.Unlock()
++		fmt.Fprintf(&logs, format, args...)
++	}, nil, func() *tailcfg.DERPRegion { return region })
++	defer c.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	err := c.Connect(ctx)
++	logMu.Lock()
++	defer logMu.Unlock()
++	if !strings.Contains(logs.String(), "connecting to derp-17") || strings.Contains(logs.String(), "fixture-secret") {
++		t.Fatal("numeric region log missing or remote region text disclosed in diagnostics")
++	}
++	if err == nil || !strings.Contains(err.Error(), "derp-17") || strings.Contains(err.Error(), "fixture-secret") {
++		t.Fatal("numeric region context missing or remote region text disclosed")
++	}
++}
+diff --git a/derp/derphttp/derphttp_client.go b/derp/derphttp/derphttp_client.go
+index fb6e321bc..798691043 100644
+--- a/derp/derphttp/derphttp_client.go
++++ b/derp/derphttp/derphttp_client.go
+@@ -22,10 +22,12 @@
+ 	"net/http"
+ 	"net/netip"
+ 	"net/url"
++	"os"
+ 	"runtime"
+ 	"strings"
+ 	"sync"
+ 	"sync/atomic"
++	"syscall"
+ 	"time"
+ 
+ 	"go4.org/mem"
+@@ -435,10 +437,12 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
+ 
+ 	defer func() {
+ 		if err != nil {
+-			if ctx.Err() != nil {
+-				err = fmt.Errorf("%v: %v", ctx.Err(), err)
++			safe := safeConnectError(ctx, "connection", err)
++			if reg != nil {
++				err = fmt.Errorf("%s connect to derp-%d: %w", caller, reg.RegionID, safe)
++			} else {
++				err = fmt.Errorf("%s: %w", caller, safe)
+ 			}
+-			err = fmt.Errorf("%s connect to %v: %v", caller, c.targetString(reg), err)
+ 			if tcpConn != nil {
+ 				go tcpConn.Close()
+ 			}
+@@ -496,37 +500,25 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
+ 			urlStr = c.url.String()
+ 			tlsConfig = c.tlsConfig(nil)
+ 		}
+-		c.logf("%s: connecting websocket to %v", caller, urlStr)
++		c.logf("%s: connecting websocket", caller)
+ 		conn, err := dialWebsocketFunc(ctx, urlStr, tlsConfig, c.headers())
+ 		if err != nil {
+-			c.logf("%s: websocket to %v error: %v", caller, urlStr, err)
+ 			return nil, 0, err
+ 		}
+-		brw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+-		derpClient, err := derp.NewClient(c.privateKey, conn, brw, c.logf,
+-			derp.MeshKey(c.MeshKey),
+-			derp.CanAckPings(c.canAckPings),
+-			derp.IsProber(c.IsProber),
+-		)
++		derpClient, err := c.websocketClient(ctx, conn)
+ 		if err != nil {
+ 			return nil, 0, err
+ 		}
+-		if c.preferred {
+-			if err := derpClient.NotePreferred(true); err != nil {
+-				go conn.Close()
+-				return nil, 0, err
+-			}
+-		}
+ 		c.serverPubKey = derpClient.ServerPublicKey()
+ 		c.client = derpClient
+ 		c.netConn = conn
+ 		c.connGen++
+ 		return c.client, c.connGen, nil
+ 	case c.url != nil:
+-		c.logf("%s: connecting to %v", caller, c.url)
++		c.logf("%s: connecting to DERP URL", caller)
+ 		tcpConn, err = c.dialURL(ctx)
+ 	default:
+-		c.logf("%s: connecting to derp-%d (%v)", caller, reg.RegionID, reg.RegionCode)
++		c.logf("%s: connecting to derp-%d", caller, reg.RegionID)
+ 		tcpConn, node, err = c.DialRegion(ctx, reg)
+ 	}
+ 	if err != nil {
+@@ -646,7 +638,7 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
+ 		}
+ 		c.logf("%s: DERP server returned status %d", caller, resp.StatusCode)
+ 		if resp.StatusCode != http.StatusSwitchingProtocols {
+-			b, _ := io.ReadAll(resp.Body)
++			tcpConn.Close()
+ 			resp.Body.Close()
+ 
+ 			// There's a situation where a proxy doesn't have an HTTP handler
+@@ -654,10 +646,10 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
+ 			// For safety, we'll assume that status codes >= 400 are
+ 			// proxies that don't support WebSockets.
+ 			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+-				c.forceWebsockets(regionID, fmt.Sprintf("GET failed with status code %d (a proxy could be disallowing the use of 'Upgrade: derp'): %s", resp.StatusCode, b))
++				c.forceWebsockets(regionID, fmt.Sprintf("GET failed with status code %d (a proxy could be disallowing the use of 'Upgrade: derp')", resp.StatusCode))
+ 			}
+ 
+-			return nil, 0, fmt.Errorf("GET failed: %v: %s", err, b)
++			return nil, 0, &connectionError{stage: "DERP upgrade", status: resp.StatusCode}
+ 		}
+ 
+ 	}
+@@ -685,6 +677,120 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
+ 	return c.client, c.connGen, nil
+ }
+ 
++func (c *Client) websocketClient(ctx context.Context, conn net.Conn) (client *derp.Client, err error) {
++	closed := make(chan struct{})
++	stop := context.AfterFunc(ctx, func() {
++		conn.Close()
++		close(closed)
++	})
++	var stopped bool
++	stopGuard := func() {
++		if !stopped {
++			stopped = true
++			if !stop() {
++				<-closed
++			}
++		}
++	}
++	defer func() {
++		stopGuard()
++		if err != nil {
++			conn.Close()
++		}
++	}()
++	brw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
++	client, err = derp.NewClient(c.privateKey, conn, brw, c.logf,
++		derp.MeshKey(c.MeshKey),
++		derp.CanAckPings(c.canAckPings),
++		derp.IsProber(c.IsProber),
++	)
++	if err != nil {
++		return nil, safeConnectError(ctx, "DERP greeting", err)
++	}
++	if c.preferred {
++		if err := client.NotePreferred(true); err != nil {
++			return nil, safeConnectError(ctx, "DERP preferred notification", err)
++		}
++	}
++	stopGuard()
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	return client, nil
++}
++
++// connectionError contains fixed diagnostics and safe context sentinels.
++// Authenticated URLs, remote bodies, and underlying error text are excluded.
++type connectionError struct {
++	stage  string
++	status int
++	kind   string
++	cause  error
++}
++
++func (e *connectionError) Error() string {
++	message := "derphttp: " + e.stage + " failed"
++	if e.status != 0 {
++		message += fmt.Sprintf(" (HTTP %d)", e.status)
++	}
++	if e.kind != "" {
++		message += " (" + e.kind + ")"
++	}
++	if e.cause != nil {
++		message += ": " + e.cause.Error()
++	}
++	return message
++}
++
++func (e *connectionError) Unwrap() error { return e.cause }
++
++func safeConnectError(ctx context.Context, stage string, err error) error {
++	var safe *connectionError
++	if !errors.As(err, &safe) {
++		safe = &connectionError{stage: stage, kind: connectErrorKind(err)}
++	}
++	cause := ctx.Err()
++	if cause == nil {
++		switch {
++		case errors.Is(err, context.Canceled):
++			cause = context.Canceled
++		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
++			cause = context.DeadlineExceeded
++		}
++	}
++	if cause != nil {
++		copy := *safe
++		copy.cause = cause
++		return &copy
++	}
++	return safe
++}
++
++func connectErrorKind(err error) string {
++	var verification *tls.CertificateVerificationError
++	var authority x509.UnknownAuthorityError
++	var hostname x509.HostnameError
++	var invalid x509.CertificateInvalidError
++	var dns *net.DNSError
++	var network net.Error
++	switch {
++	case errors.Is(err, tshttpproxy.ErrConflictingProxyEnvironment):
++		return "conflicting proxy environment"
++	case errors.As(err, &verification), errors.As(err, &authority), errors.As(err, &hostname), errors.As(err, &invalid):
++		return "TLS verification"
++	case errors.As(err, &dns):
++		return "DNS"
++	case errors.Is(err, syscall.ECONNREFUSED):
++		return "connection refused"
++	case errors.Is(err, os.ErrDeadlineExceeded), errors.Is(err, context.DeadlineExceeded):
++		return "timeout"
++	case errors.As(err, &network) && network.Timeout():
++		return "timeout"
++	default:
++		return ""
++	}
++}
++
+ // SetURLDialer sets the dialer to use for dialing URLs.
+ // This dialer is only use for clients created with NewClient, not NewRegionClient.
+ // If unset or nil, the default dialer is used.
+@@ -876,7 +982,11 @@ func (c *Client) dialNode(ctx context.Context, n *tailcfg.DERPNode) (net.Conn, e
+ 			Path:   "/", // unused
+ 		},
+ 	}
+-	if proxyURL, err := tshttpproxy.ProxyFromEnvironment(proxyReq); err == nil && proxyURL != nil {
++	proxyURL, err := tshttpproxy.ProxyFromEnvironment(proxyReq)
++	if err != nil {
++		return nil, safeConnectError(ctx, "proxy selection", err)
++	}
++	if proxyURL != nil {
+ 		return c.dialNodeUsingProxy(ctx, n, proxyURL)
+ 	}
+ 
+@@ -968,25 +1078,29 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
+ 		var d net.Dialer
+ 		proxyConn, err = d.DialContext(ctx, "tcp", net.JoinHostPort(pu.Hostname(), firstStr(pu.Port(), "80")))
+ 	}
++	conn := proxyConn
+ 	defer func() {
+-		if err != nil && proxyConn != nil {
+-			// In a goroutine in case it's a *tls.Conn (that can block on Close)
+-			// TODO(bradfitz): track the underlying tcp.Conn and just close that instead.
+-			go proxyConn.Close()
++		if err != nil && conn != nil {
++			conn.SetDeadline(time.Now())
++			conn.Close()
+ 		}
+ 	}()
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	done := make(chan struct{})
+-	defer close(done)
+-	go func() {
+-		select {
+-		case <-done:
+-			return
+-		case <-ctx.Done():
+-			proxyConn.Close()
++	closed := make(chan struct{})
++	stop := context.AfterFunc(ctx, func() {
++		conn.SetDeadline(time.Now())
++		conn.Close()
++		close(closed)
++	})
++	defer func() {
++		if !stop() {
++			<-closed
++		}
++		if ctx.Err() != nil {
++			proxyConn, err = nil, ctx.Err()
+ 		}
+ 	}()
+ 
+@@ -999,7 +1113,7 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
+ 
+ 	var authHeader string
+ 	if v, err := tshttpproxy.GetAuthHeader(pu); err != nil {
+-		c.logf("derphttp: error getting proxy auth header for %v: %v", proxyURL, err)
++		return nil, safeConnectError(ctx, "proxy authentication", err)
+ 	} else if v != "" {
+ 		authHeader = fmt.Sprintf("Proxy-Authorization: %s\r\n", v)
+ 	}
+@@ -1017,12 +1131,11 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
+ 		if ctx.Err() != nil {
+ 			return nil, ctx.Err()
+ 		}
+-		c.logf("derphttp: CONNECT dial to %s: %v", target, err)
+-		return nil, err
++		return nil, safeConnectError(ctx, "proxy CONNECT", err)
+ 	}
+-	c.logf("derphttp: CONNECT dial to %s: %v", target, res.Status)
++	c.logf("derphttp: CONNECT status %d", res.StatusCode)
+ 	if res.StatusCode != 200 {
+-		return nil, fmt.Errorf("invalid response status from HTTP proxy %s on CONNECT to %s: %v", pu, target, res.Status)
++		return nil, &connectionError{stage: "proxy CONNECT", status: res.StatusCode}
+ 	}
+ 	return proxyConn, nil
+ }
+diff --git a/derp/derphttp/websocket.go b/derp/derphttp/websocket.go
+index 89c281b3d..dd1e95665 100644
+--- a/derp/derphttp/websocket.go
++++ b/derp/derphttp/websocket.go
+@@ -8,10 +8,14 @@
+ import (
+ 	"context"
+ 	"crypto/tls"
++	"errors"
+ 	"net"
+ 	"net/http"
++	"net/url"
++	"sync"
+ 
+ 	"github.com/coder/websocket"
++	"tailscale.com/net/tshttpproxy"
+ )
+ 
+ func init() {
+@@ -19,21 +23,141 @@ func init() {
+ }
+ 
+ func dialWebsocket(ctx context.Context, urlStr string, tlsConfig *tls.Config, httpHeader http.Header) (net.Conn, error) {
+-	c, _, err := websocket.Dial(ctx, urlStr, &websocket.DialOptions{
++	tr, err := websocketTransport(ctx, urlStr, tlsConfig)
++	if err != nil {
++		return nil, err
++	}
++	return dialWebsocketTransport(ctx, urlStr, httpHeader, tr)
++}
++
++func dialWebsocketTransport(ctx context.Context, urlStr string, httpHeader http.Header, tr *http.Transport) (net.Conn, error) {
++	defer tr.CloseIdleConnections()
++	c, res, err := websocket.Dial(ctx, urlStr, &websocket.DialOptions{
+ 		Subprotocols: []string{"derp"},
+ 		HTTPHeader:   httpHeader,
+ 		HTTPClient: &http.Client{
+-			Transport: &http.Transport{
+-				TLSClientConfig: tlsConfig,
++			Transport: tr,
++			CheckRedirect: func(*http.Request, []*http.Request) error {
++				return http.ErrUseLastResponse
+ 			},
+ 		},
+ 	})
+ 	// We can't log anything here, otherwise it'll appear in SSH output!
+ 	if err != nil {
+-		// log.Printf("websocket Dial: %v, %+v", err, res)
+-		return nil, err
++		if res != nil {
++			if res.Body != nil {
++				res.Body.Close()
++			}
++			err = &connectionError{stage: "WebSocket upgrade", status: res.StatusCode}
++		}
++		return nil, safeConnectError(ctx, "WebSocket dial", err)
++	}
++	return &websocketConn{Conn: websocket.NetConn(context.Background(), c, websocket.MessageBinary), ws: c}, nil
++}
++
++// websocketTransport keeps proxy authentication outside the relay TLS tunnel.
++func websocketTransport(ctx context.Context, urlStr string, tlsConfig *tls.Config) (*http.Transport, error) {
++	return websocketTransportWithProxy(ctx, urlStr, tlsConfig, tshttpproxy.ProxyFromEnvironment)
++}
++
++func websocketTransportWithProxy(ctx context.Context, urlStr string, tlsConfig *tls.Config, selectProxy func(*http.Request) (*url.URL, error)) (*http.Transport, error) {
++	u, err := url.Parse(urlStr)
++	if err != nil {
++		return nil, safeConnectError(ctx, "WebSocket URL", err)
++	}
++	switch u.Scheme {
++	case "ws":
++		u.Scheme = "http"
++	case "wss":
++		u.Scheme = "https"
++	}
++	proxyURL, err := selectProxy((&http.Request{URL: u}).WithContext(ctx))
++	if err != nil {
++		return nil, safeConnectError(ctx, "proxy selection", err)
++	}
++	if proxyURL != nil && proxyURL.Scheme != "http" && proxyURL.Scheme != "https" {
++		return nil, &connectionError{stage: "unsupported proxy scheme"}
++	}
++	tr := &http.Transport{
++		TLSClientConfig:       tlsConfig,
++		Proxy:                 http.ProxyURL(proxyURL),
++		GetProxyConnectHeader: proxyConnectHeaders(tshttpproxy.GetAuthHeader),
++		OnProxyConnectResponse: func(ctx context.Context, _ *url.URL, _ *http.Request, res *http.Response) error {
++			if res.StatusCode != http.StatusOK {
++				return &connectionError{stage: "proxy CONNECT", status: res.StatusCode}
++			}
++			return nil
++		},
++	}
++	if proxyURL == nil || proxyURL.Scheme != "https" {
++		return tr, nil
++	}
++
++	// The relay's verifier, mTLS identity, and key logger must not be used
++	// for the outer TLS connection to a different peer.
++	proxyTLS := &tls.Config{
++		ServerName: proxyURL.Hostname(),
++		MinVersion: tls.VersionTLS12,
++		NextProtos: []string{"http/1.1"},
++	}
++	if tlsConfig != nil && tlsConfig.MinVersion > proxyTLS.MinVersion {
++		proxyTLS.MinVersion = tlsConfig.MinVersion
++	}
++	authority := net.JoinHostPort(proxyURL.Hostname(), firstStr(proxyURL.Port(), "443"))
++	tr.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
++		if addr != authority {
++			return nil, &connectionError{stage: "unexpected proxy authority"}
++		}
++		dial := tr.DialContext
++		if dial == nil {
++			dial = (&net.Dialer{}).DialContext
++		}
++		conn, err := dial(ctx, network, addr)
++		if err != nil {
++			return nil, safeConnectError(ctx, "proxy dial", err)
++		}
++		tc := tls.Client(conn, proxyTLS)
++		if err := tc.HandshakeContext(ctx); err != nil {
++			conn.Close()
++			return nil, safeConnectError(ctx, "proxy TLS", err)
++		}
++		return tc, nil
++	}
++	return tr, nil
++}
++
++func proxyConnectHeaders(auth func(*url.URL) (string, error)) func(context.Context, *url.URL, string) (http.Header, error) {
++	return func(ctx context.Context, proxyURL *url.URL, _ string) (http.Header, error) {
++		if ctx.Err() != nil {
++			return nil, ctx.Err()
++		}
++		value, err := auth(proxyURL)
++		if err != nil {
++			return nil, safeConnectError(ctx, "proxy authentication", err)
++		}
++		if value == "" {
++			return nil, nil
++		}
++		return http.Header{"Proxy-Authorization": []string{value}}, nil
++	}
++}
++
++type websocketConn struct {
++	net.Conn
++	ws   *websocket.Conn
++	once sync.Once
++	err  error
++}
++
++func (c *websocketConn) Close() error {
++	c.once.Do(func() {
++		// NetConn.Close waits for a WebSocket close handshake. A stalled
++		// relay must not extend the connection-establishment deadline.
++		c.err = c.ws.CloseNow()
++		_ = c.Conn.Close()
++	})
++	if errors.Is(c.err, net.ErrClosed) {
++		return nil
+ 	}
+-	// log.Printf("websocket: connected to %v", urlStr)
+-	netConn := websocket.NetConn(context.Background(), c, websocket.MessageBinary)
+-	return netConn, nil
++	return c.err
+ }
+diff --git a/derp/derphttp/websocket_proxy_test.go b/derp/derphttp/websocket_proxy_test.go
+new file mode 100644
+index 000000000..d476a7ecf
+--- /dev/null
++++ b/derp/derphttp/websocket_proxy_test.go
+@@ -0,0 +1,873 @@
++// Copyright (c) Tailscale Inc & AUTHORS
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build !js
++
++package derphttp
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/sha1"
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/base64"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"io"
++	"log"
++	"math/big"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/coder/websocket"
++	"tailscale.com/derp"
++	"tailscale.com/tailcfg"
++	"tailscale.com/types/key"
++	"tailscale.com/util/racebuild"
++)
++
++// Proxy and root certificate configuration are cached process-wide. Each fixture
++// starts without the parent's credentials, proxy variables, or debug settings.
++func isolatedProxyTest(t *testing.T) bool {
++	t.Helper()
++	if os.Getenv("DERP_PROXY_TEST") == t.Name() {
++		return false
++	}
++	t.Parallel()
++	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
++	defer cancel()
++	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+regexp.QuoteMeta(t.Name())+"$", "-test.timeout=35s")
++	cmd.Env = []string{"DERP_PROXY_TEST=" + t.Name(), "GOTRACEBACK=none"}
++	out, err := cmd.CombinedOutput()
++	for _, marker := range []string{"fixture-secret", "Zml4dHVyZS1zZWNyZXQ="} {
++		if strings.Contains(string(out), marker) {
++			t.Fatal("fixture disclosed a synthetic credential")
++		}
++	}
++	if err != nil {
++		t.Fatalf("isolated fixture failed: %s", out)
++	}
++	return true
++}
++
++func proxyMust(t *testing.T, err error) {
++	t.Helper()
++	if err != nil {
++		t.Fatalf("fixture operation failed (%T)", err)
++	}
++}
++
++func forbidOriginDNS(t *testing.T) *atomic.Int32 {
++	t.Helper()
++	var attempts atomic.Int32
++	net.DefaultResolver = &net.Resolver{PreferGo: true, Dial: func(context.Context, string, string) (net.Conn, error) {
++		attempts.Add(1)
++		return nil, errors.New("fixture blocks origin DNS")
++	}}
++	t.Cleanup(func() {
++		if attempts.Load() != 0 {
++			t.Error("unintended origin DNS attempted")
++		}
++	})
++	return &attempts
++}
++
++func connectProxy(t *testing.T, upstream string, status int, check func(*http.Request), tlsConfig ...*tls.Config) (*httptest.Server, *atomic.Int32) {
++	t.Helper()
++	var connects atomic.Int32
++	s := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		connects.Add(1)
++		if r.Method != http.MethodConnect {
++			t.Error("proxy received unexpected method")
++			w.WriteHeader(http.StatusMethodNotAllowed)
++			return
++		}
++		if check != nil {
++			check(r)
++		}
++		if status != http.StatusOK {
++			w.WriteHeader(status)
++			_, _ = io.WriteString(w, "fixture-secret-denial-body")
++			return
++		}
++		up, err := net.DialTimeout("tcp", upstream, 3*time.Second)
++		if err != nil {
++			t.Error("proxy cannot reach local relay")
++			w.WriteHeader(http.StatusBadGateway)
++			return
++		}
++		defer up.Close()
++		down, rw, err := w.(http.Hijacker).Hijack()
++		if err != nil {
++			t.Error("proxy hijack failed")
++			return
++		}
++		defer down.Close()
++		_, _ = io.WriteString(rw, "HTTP/1.1 200 Connection Established\r\n\r\n")
++		if rw.Flush() != nil {
++			return
++		}
++		done := make(chan struct{})
++		go func() {
++			_, _ = io.Copy(up, rw)
++			up.Close()
++			close(done)
++		}()
++		_, _ = io.Copy(down, up)
++		down.Close()
++		<-done
++	}))
++	s.Config.ErrorLog = log.New(io.Discard, "", 0)
++	if len(tlsConfig) != 0 {
++		s.TLS = tlsConfig[0]
++		s.StartTLS()
++	} else {
++		s.Start()
++	}
++	t.Cleanup(s.Close)
++	return s, &connects
++}
++
++func TestProxyWebsocketRouting(t *testing.T) {
++	t.Parallel()
++	relay := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"derp"}})
++		if err != nil {
++			return
++		}
++		defer c.CloseNow()
++		_ = c.Write(r.Context(), websocket.MessageBinary, []byte("fixture"))
++		_, _, _ = c.Read(r.Context())
++	}))
++	defer relay.Close()
++	proxy, connects := connectProxy(t, relay.Listener.Addr().String(), http.StatusOK, func(r *http.Request) {
++		if r.Host != "example.com:443" {
++			t.Error("wrong CONNECT authority")
++		}
++	})
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	conf := relay.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
++	conf.ServerName = "example.com"
++	tr := fixedProxyTransport(t, ctx, "https://example.com/derp", conf, proxy.URL)
++	conn, err := dialWebsocketTransport(ctx, "https://example.com/derp", nil, tr)
++	proxyMust(t, err)
++	defer conn.Close()
++	buf := make([]byte, 7)
++	_, err = io.ReadFull(conn, buf)
++	proxyMust(t, err)
++	if string(buf) != "fixture" || connects.Load() != 1 {
++		t.Fatal("proxy WebSocket exchange incomplete")
++	}
++}
++
++func TestProxyWebsocketGreetingCancellation(t *testing.T) {
++	if isolatedProxyTest(t) {
++		return
++	}
++	accepted := make(chan *websocket.Conn, 1)
++	relay := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		c, err := websocket.Accept(w, r, nil)
++		if err != nil {
++			return
++		}
++		accepted <- c
++		defer c.CloseNow()
++		_, _, _ = c.Read(r.Context())
++	}))
++	defer relay.Close()
++	c, err := NewClient(key.NewNode(), relay.URL+"/derp", func(string, ...any) {})
++	proxyMust(t, err)
++	c.ForceWebsockets = true
++	c.TLSConfig = relay.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan error, 1)
++	go func() { done <- c.Connect(ctx) }()
++	var ws *websocket.Conn
++	select {
++	case ws = <-accepted:
++	case <-time.After(3 * time.Second):
++		t.Fatal("fixture upgrade did not complete")
++	}
++	defer ws.CloseNow()
++	pingCtx, pingCancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer pingCancel()
++	proxyMust(t, ws.Ping(pingCtx))
++	cancel()
++	select {
++	case err := <-done:
++		if !errors.Is(err, context.Canceled) {
++			t.Error("DERP greeting lost cancellation identity")
++		}
++	case <-time.After(time.Second):
++		ws.CloseNow()
++		<-done
++		t.Error("post-upgrade DERP greeting ignored cancellation")
++	}
++	_ = c.Close()
++}
++
++func TestProxyWebsocketEnvironment(t *testing.T) {
++	for _, tc := range []struct {
++		name, target string
++		env          map[string]string
++		want         string
++		wantError    bool
++	}{
++		{name: "https", target: "wss://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://secure-proxy.test:8080", "HTTP_PROXY": "http://plain-proxy.test:8080"}, want: "secure-proxy.test:8080"},
++		{name: "http", target: "ws://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://secure-proxy.test:8080", "HTTP_PROXY": "http://plain-proxy.test:8080"}, want: "plain-proxy.test:8080"},
++		{name: "lowercase", target: "https://relay.test/derp", env: map[string]string{"https_proxy": "http://lower-proxy.test:8080"}, want: "lower-proxy.test:8080"},
++		{name: "case_conflict", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://upper-proxy.test:8080", "https_proxy": "http://lower-proxy.test:8080"}, wantError: true},
++		{name: "all_proxy_unchanged", target: "https://relay.test/derp", env: map[string]string{"ALL_PROXY": "http://unused-proxy.test:8080"}},
++		{name: "domain_bypass", target: "https://relay.test/derp", env: map[string]string{"HTTPS_PROXY": "http://proxy.test:8080", "NO_PROXY": "relay.test"}},
++		{name: "cgi_error", target: "http://relay.test/derp", env: map[string]string{"HTTP_PROXY": "http://proxy.test:8080", "REQUEST_METHOD": "GET"}, wantError: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			if isolatedProxyTest(t) {
++				return
++			}
++			for k, v := range tc.env {
++				t.Setenv(k, v)
++			}
++			tr, err := websocketTransport(context.Background(), tc.target, nil)
++			if tc.wantError {
++				if err == nil {
++					t.Fatal("proxy selection error was ignored")
++				}
++				return
++			}
++			proxyMust(t, err)
++			defer tr.CloseIdleConnections()
++			u, err := tr.Proxy(&http.Request{})
++			proxyMust(t, err)
++			if (tc.want == "" && u != nil) || (tc.want != "" && (u == nil || u.Host != tc.want)) {
++				t.Fatal("unexpected proxy selection")
++			}
++
++		})
++	}
++}
++
++func TestProxyWebsocketDirectAndNoProxy(t *testing.T) {
++	for _, bypass := range []bool{false, true} {
++		t.Run(fmt.Sprint(bypass), func(t *testing.T) {
++			if isolatedProxyTest(t) {
++				return
++			}
++			forbidOriginDNS(t)
++			relay := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"derp"}})
++				if err != nil {
++					t.Error("direct relay upgrade failed")
++					return
++				}
++				defer ws.CloseNow()
++				_ = ws.Write(r.Context(), websocket.MessageBinary, []byte("direct"))
++				_, _, _ = ws.Read(r.Context())
++			}))
++			defer relay.Close()
++			var proxyRequests atomic.Int32
++			unusedProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++				proxyRequests.Add(1)
++				w.WriteHeader(http.StatusForbidden)
++			}))
++			defer unusedProxy.Close()
++			if bypass {
++				t.Setenv("HTTPS_PROXY", unusedProxy.URL)
++				t.Setenv("NO_PROXY", "example.com")
++			}
++			conf := relay.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
++			conf.ServerName = "example.com"
++			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++			defer cancel()
++			tr, err := websocketTransport(ctx, "https://example.com/derp", conf)
++			proxyMust(t, err)
++			var dials atomic.Int32
++			tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
++				if addr != "example.com:443" {
++					return nil, errors.New("unexpected direct fixture authority")
++				}
++				dials.Add(1)
++				return (&net.Dialer{}).DialContext(ctx, network, relay.Listener.Addr().String())
++			}
++			conn, err := dialWebsocketTransport(ctx, "https://example.com/derp", nil, tr)
++			proxyMust(t, err)
++			defer conn.Close()
++			data := make([]byte, 6)
++			_, err = io.ReadFull(conn, data)
++			proxyMust(t, err)
++			if string(data) != "direct" || dials.Load() != 1 || proxyRequests.Load() != 0 {
++				t.Error("permitted direct WebSocket exchange failed")
++			}
++		})
++	}
++}
++
++func TestProxyWebsocketIPv4ProxyRoute(t *testing.T) {
++	t.Parallel()
++	relay := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.TLS.ServerName != "example.com" {
++			t.Error("IPv4 fallback lost relay TLS identity")
++		}
++		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"derp"}})
++		if err != nil {
++			t.Error("IPv4 relay fixture upgrade failed")
++			return
++		}
++		defer ws.CloseNow()
++		_ = ws.Write(r.Context(), websocket.MessageBinary, []byte("IPv4"))
++		_, _, _ = ws.Read(r.Context())
++	}))
++	defer relay.Close()
++	proxy, connects := connectProxy(t, relay.Listener.Addr().String(), http.StatusOK, func(r *http.Request) {
++		if r.Host != "192.0.2.1:8443" {
++			t.Error("IPv4 CONNECT target changed")
++		}
++	})
++	pu, err := url.Parse(proxy.URL)
++	proxyMust(t, err)
++	n := &tailcfg.DERPNode{HostName: "example.com", IPv4: "192.0.2.1", DERPPort: 8443}
++	c := &Client{}
++	target := c.urlString(n)
++	conf := relay.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
++	conf.ServerName = c.tlsServerName(n)
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	tr := fixedProxyTransport(t, ctx, target, conf, proxy.URL)
++	var proxyDials, directDials atomic.Int32
++	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
++		if addr != pu.Host {
++			directDials.Add(1)
++			return nil, errors.New("fixture forbids direct IPv4 dialing")
++		}
++		proxyDials.Add(1)
++		return (&net.Dialer{}).DialContext(ctx, network, addr)
++	}
++	conn, err := dialWebsocketTransport(ctx, target, nil, tr)
++	proxyMust(t, err)
++	defer conn.Close()
++	data := make([]byte, 4)
++	_, err = io.ReadFull(conn, data)
++	proxyMust(t, err)
++	if string(data) != "IPv4" || connects.Load() != 1 || proxyDials.Load() != 1 || directDials.Load() != 0 {
++		t.Error("IPv4 fallback attempted an unintended direct route")
++	}
++}
++
++func TestProxyWebsocketHTTPForward(t *testing.T) {
++	t.Parallel()
++	var requests atomic.Int32
++	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requests.Add(1)
++		if r.Method != http.MethodGet || !r.URL.IsAbs() || r.URL.Host != "relay.test:8080" || r.URL.Path != "/derp" {
++			t.Error("plain HTTP proxy did not receive absolute-form upgrade")
++			w.WriteHeader(http.StatusBadRequest)
++			return
++		}
++		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"derp"}})
++		if err != nil {
++			t.Error("forward proxy upgrade failed")
++			return
++		}
++		defer ws.CloseNow()
++		_ = ws.Write(r.Context(), websocket.MessageBinary, []byte("forward"))
++		_, _, _ = ws.Read(r.Context())
++	}))
++	defer proxy.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	tr := fixedProxyTransport(t, ctx, "http://relay.test:8080/derp", nil, proxy.URL)
++	conn, err := dialWebsocketTransport(ctx, "http://relay.test:8080/derp", nil, tr)
++	proxyMust(t, err)
++	defer conn.Close()
++	data := make([]byte, 7)
++	_, err = io.ReadFull(conn, data)
++	proxyMust(t, err)
++	if string(data) != "forward" || requests.Load() != 1 {
++		t.Error("plain HTTP forward proxy exchange incomplete")
++	}
++}
++
++func TestProxyWebsocketConnectLimit(t *testing.T) {
++	if racebuild.On {
++		t.Skip("default ten-second deadline is covered once; race checks use explicit cancellation")
++	}
++	if isolatedProxyTest(t) {
++		return
++	}
++	relay := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"derp"}})
++		if err != nil {
++			return
++		}
++		defer ws.CloseNow()
++		_, _, _ = ws.Read(r.Context())
++	}))
++	defer relay.Close()
++	c, err := NewClient(key.NewNode(), relay.URL+"/derp", func(string, ...any) {})
++	proxyMust(t, err)
++	defer c.Close()
++	c.ForceWebsockets = true
++	c.TLSConfig = relay.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
++	done := make(chan error, 1)
++	go func() { done <- c.Connect(context.Background()) }()
++	select {
++	case err := <-done:
++		if !errors.Is(err, context.DeadlineExceeded) {
++			t.Error("default connect limit lost deadline identity")
++		}
++	case <-time.After(12 * time.Second):
++		c.Close()
++		<-done
++		t.Error("post-upgrade greeting exceeded default connect limit")
++	}
++}
++
++func TestProxyWebsocketAuthCallback(t *testing.T) {
++	t.Parallel()
++	pu, _ := url.Parse("http://proxy.test:8080")
++	for _, tc := range []struct {
++		name, value string
++		err         error
++	}{
++		{name: "empty"},
++		{name: "synthetic", value: "fixture-secret-auth"},
++		{name: "error", err: errors.New("fixture-secret-error")},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Parallel()
++			callback := proxyConnectHeaders(func(*url.URL) (string, error) { return tc.value, tc.err })
++			h, err := callback(context.Background(), pu, "relay.test:443")
++			if tc.err != nil {
++				if err == nil || strings.Contains(err.Error(), "fixture-secret") || errors.Unwrap(err) != nil {
++					t.Fatal("proxy auth error was not sanitized")
++				}
++				return
++			}
++			proxyMust(t, err)
++			if h.Get("Proxy-Authorization") != tc.value || (tc.value != "" && len(h) != 1) {
++				t.Fatal("unexpected proxy auth header set")
++			}
++		})
++	}
++}
++
++type proxyCA struct {
++	cert *x509.Certificate
++	key  *ecdsa.PrivateKey
++	pem  []byte
++	pool *x509.CertPool
++}
++
++func newProxyCA(t *testing.T) proxyCA {
++	t.Helper()
++	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	proxyMust(t, err)
++	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "local fixture CA"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature}
++	der, err := x509.CreateCertificate(rand.Reader, template, template, &k.PublicKey, k)
++	proxyMust(t, err)
++	cert, err := x509.ParseCertificate(der)
++	proxyMust(t, err)
++	encoded := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
++	pool := x509.NewCertPool()
++	pool.AddCert(cert)
++	return proxyCA{cert: cert, key: k, pem: encoded, pool: pool}
++}
++
++func (ca proxyCA) leaf(t *testing.T, name string, client bool) tls.Certificate {
++	t.Helper()
++	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	proxyMust(t, err)
++	usage := x509.ExtKeyUsageServerAuth
++	if client {
++		usage = x509.ExtKeyUsageClientAuth
++	}
++	template := &x509.Certificate{SerialNumber: big.NewInt(2), DNSNames: []string{name}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{usage}}
++	der, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &k.PublicKey, ca.key)
++	proxyMust(t, err)
++	return tls.Certificate{Certificate: [][]byte{der, ca.cert.Raw}, PrivateKey: k}
++}
++
++func TestProxyWebsocketTLSSeparation(t *testing.T) {
++	for _, name := range []string{"verified", "proxy_untrusted", "proxy_wrong_name", "relay_untrusted", "relay_wrong_name"} {
++		t.Run(name, func(t *testing.T) {
++			if isolatedProxyTest(t) {
++				return
++			}
++			forbidOriginDNS(t)
++			outerCA, innerCA := newProxyCA(t), newProxyCA(t)
++			rootFile := filepath.Join(t.TempDir(), "proxy-roots.pem")
++			roots := outerCA.pem
++			if name == "proxy_untrusted" {
++				roots = innerCA.pem
++			}
++			proxyMust(t, os.WriteFile(rootFile, roots, 0600))
++			t.Setenv("SSL_CERT_FILE", rootFile)
++			t.Setenv("SSL_CERT_DIR", t.TempDir())
++			var relayRequests atomic.Int32
++			relay := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				relayRequests.Add(1)
++				if r.TLS.ServerName != "relay.test" || len(r.TLS.PeerCertificates) == 0 || r.Header.Get("Proxy-Authorization") != "" || r.Header.Get("Coder-Session-Token") != "" || r.Header.Get("X-Fixture-Gateway") != "fixture-secret-gateway" {
++					t.Error("relay identity or credential boundary failed")
++				}
++				c, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"derp"}})
++				if err != nil {
++					return
++				}
++				defer c.CloseNow()
++				_ = c.Write(r.Context(), websocket.MessageBinary, []byte("verified"))
++				_, _, _ = c.Read(r.Context())
++			}))
++			relay.TLS = &tls.Config{Certificates: []tls.Certificate{innerCA.leaf(t, "relay.test", false)}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: innerCA.pool, MinVersion: tls.VersionTLS12}
++			relay.Config.ErrorLog = log.New(io.Discard, "", 0)
++			relay.StartTLS()
++			defer relay.Close()
++			proxyName := "proxy.test"
++			if name == "proxy_wrong_name" {
++				proxyName = "wrong.test"
++			}
++			proxy, connects := connectProxy(t, relay.Listener.Addr().String(), http.StatusOK, func(r *http.Request) {
++				auth := &http.Request{Header: http.Header{}}
++				auth.SetBasicAuth("fixture-secret-user", "fixture-secret-password")
++				if r.Host != "relay.test:443" || r.TLS.ServerName != "proxy.test" || len(r.TLS.PeerCertificates) != 0 || r.Header.Get("Proxy-Authorization") != auth.Header.Get("Authorization") || r.Header.Get("X-Fixture-Gateway") != "" {
++					t.Error("proxy identity or credential boundary failed")
++				}
++			}, &tls.Config{Certificates: []tls.Certificate{outerCA.leaf(t, proxyName, false)}, ClientAuth: tls.RequestClientCert, MinVersion: tls.VersionTLS12})
++			_, port, err := net.SplitHostPort(proxy.Listener.Addr().String())
++			proxyMust(t, err)
++			pu := &url.URL{Scheme: "https", Host: net.JoinHostPort("proxy.test", port), User: url.UserPassword("fixture-secret-user", "fixture-secret-password")}
++			t.Setenv("HTTPS_PROXY", pu.String())
++			conf := &tls.Config{ServerName: "relay.test", RootCAs: innerCA.pool, Certificates: []tls.Certificate{innerCA.leaf(t, "client.test", true)}, MinVersion: tls.VersionTLS12}
++			if name == "relay_untrusted" {
++				conf.RootCAs = outerCA.pool
++			}
++			if name == "relay_wrong_name" {
++				conf.ServerName = "wrong.test"
++			}
++			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++			defer cancel()
++			tr, err := websocketTransport(ctx, "https://relay.test/derp", conf)
++			proxyMust(t, err)
++			var dials atomic.Int32
++			tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
++				dials.Add(1)
++				if addr != pu.Host {
++					return nil, errors.New("unintended direct address")
++				}
++				return (&net.Dialer{}).DialContext(ctx, network, proxy.Listener.Addr().String())
++			}
++			conn, err := dialWebsocketTransport(ctx, "https://relay.test/derp", http.Header{"X-Fixture-Gateway": []string{"fixture-secret-gateway"}}, tr)
++			if name != "verified" {
++				if err == nil {
++					conn.Close()
++					t.Fatal("invalid TLS accepted")
++				}
++				if strings.Contains(err.Error(), "fixture-secret") || relayRequests.Load() != 0 {
++					t.Fatal("TLS failure disclosed credentials or reached relay HTTP")
++				}
++				return
++			}
++			proxyMust(t, err)
++			defer conn.Close()
++			buf := make([]byte, 8)
++			_, err = io.ReadFull(conn, buf)
++			proxyMust(t, err)
++			if string(buf) != "verified" || dials.Load() != 1 || connects.Load() != 1 {
++				t.Fatal("TLS proxy exchange incomplete")
++			}
++		})
++	}
++}
++
++func TestProxyWebsocketDenied(t *testing.T) {
++	for _, name := range []string{"connect_403", "connect_407", "upgrade_403", "malformed_101", "wrong_subprotocol", "redirect"} {
++		t.Run(name, func(t *testing.T) {
++			t.Parallel()
++			var redirected atomic.Int32
++			target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { redirected.Add(1) }))
++			defer target.Close()
++			relay := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				switch name {
++				case "wrong_subprotocol":
++					accept := sha1.Sum([]byte(r.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
++					w.Header().Set("Sec-WebSocket-Accept", base64.StdEncoding.EncodeToString(accept[:]))
++					w.Header().Set("Connection", "Upgrade")
++					w.Header().Set("Upgrade", "websocket")
++					w.Header().Set("Sec-WebSocket-Protocol", "fixture-secret-wrong-protocol")
++					w.WriteHeader(http.StatusSwitchingProtocols)
++				case "malformed_101":
++					w.WriteHeader(http.StatusSwitchingProtocols)
++				case "redirect":
++					w.Header().Set("Location", target.URL)
++					w.WriteHeader(http.StatusFound)
++				default:
++					w.WriteHeader(http.StatusForbidden)
++				}
++				_, _ = io.WriteString(w, "fixture-secret-upgrade-body")
++			}))
++			defer relay.Close()
++			status := http.StatusOK
++			if name == "connect_403" {
++				status = http.StatusForbidden
++			} else if name == "connect_407" {
++				status = http.StatusProxyAuthRequired
++			}
++			proxy, connects := connectProxy(t, relay.Listener.Addr().String(), status, nil)
++			pu, _ := url.Parse(proxy.URL)
++			pu.User = url.UserPassword("fixture-secret-user", "fixture-secret-password")
++			conf := relay.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
++			conf.ServerName = "example.com"
++			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++			defer cancel()
++			tr := fixedProxyTransport(t, ctx, "https://example.com/derp", conf, pu.String())
++			conn, err := dialWebsocketTransport(ctx, "https://example.com/derp", http.Header{"X-Fixture-Gateway": []string{"fixture-secret-gateway"}}, tr)
++			if err == nil {
++				conn.Close()
++				t.Fatal("denied or malformed upgrade accepted")
++			}
++			if connects.Load() != 1 || redirected.Load() != 0 || strings.Contains(err.Error(), "fixture-secret") {
++				t.Fatal("denial changed route or disclosed a synthetic credential")
++			}
++		})
++	}
++}
++
++func TestProxyWebsocketCancellationPhases(t *testing.T) {
++	for _, phase := range []string{"proxy_dial", "proxy_tls", "connect", "relay_tls", "upgrade", "greeting_deadline", "client_close", "invalid_greeting"} {
++		t.Run(phase, func(t *testing.T) {
++			if phase == "upgrade" || phase == "greeting_deadline" || phase == "client_close" || phase == "invalid_greeting" {
++				if isolatedProxyTest(t) {
++					return
++				}
++			} else {
++				t.Parallel()
++			}
++			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
++			defer cancel()
++			switch phase {
++			case "proxy_dial", "proxy_tls", "connect", "relay_tls":
++				accepted := make(chan net.Conn, 1)
++				ln, err := net.Listen("tcp", "127.0.0.1:0")
++				proxyMust(t, err)
++				defer ln.Close()
++				go func() {
++					conn, err := ln.Accept()
++					if err == nil {
++						accepted <- conn
++					}
++				}()
++				proxyScheme := "http"
++				if phase == "proxy_tls" {
++					proxyScheme = "https"
++				}
++				tr := fixedProxyTransport(t, ctx, "https://relay.test/derp", nil, proxyScheme+"://"+ln.Addr().String())
++				if phase == "proxy_dial" {
++					tr.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) { <-ctx.Done(); return nil, ctx.Err() }
++				} else if phase == "relay_tls" {
++					peerClosed := make(chan error, 1)
++					go func() {
++						conn := <-accepted
++						defer conn.Close()
++						_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
++						r := bufio.NewReader(conn)
++						_, _ = http.ReadRequest(r)
++						_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
++						_, err := io.Copy(io.Discard, conn)
++						peerClosed <- err
++					}()
++					defer func() {
++						select {
++						case err := <-peerClosed:
++							var ne net.Error
++							if errors.As(err, &ne) && ne.Timeout() {
++								t.Error("cancellation left relay TLS socket open")
++							}
++						case <-time.After(time.Second):
++							t.Error("cancellation did not close relay TLS socket")
++						}
++					}()
++				}
++				_, err = dialWebsocketTransport(ctx, "https://relay.test/derp", nil, tr)
++				if !errors.Is(err, context.DeadlineExceeded) {
++					t.Error("connection phase ignored deadline")
++				}
++				if phase != "proxy_dial" && phase != "relay_tls" {
++					select {
++					case conn := <-accepted:
++						_ = conn.SetReadDeadline(time.Now().Add(time.Second))
++						_, err := io.Copy(io.Discard, conn)
++						var ne net.Error
++						if errors.As(err, &ne) && ne.Timeout() {
++							t.Error("cancellation left proxy socket open")
++						}
++						conn.Close()
++					case <-time.After(time.Second):
++						t.Error("fixture connection missing")
++					}
++				}
++			default:
++				opened := make(chan *websocket.Conn, 1)
++				peerClosed := make(chan error, 1)
++				relay := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++					if phase == "upgrade" {
++						<-r.Context().Done()
++						peerClosed <- nil
++						return
++					}
++					ws, err := websocket.Accept(w, r, nil)
++					if err == nil {
++						defer ws.CloseNow()
++						opened <- ws
++						if phase == "invalid_greeting" {
++							_ = ws.Close(websocket.StatusPolicyViolation, "fixture-secret-close-reason")
++						}
++						peerCtx, peerCancel := context.WithTimeout(context.Background(), 2*time.Second)
++						defer peerCancel()
++						_, _, err := ws.Read(peerCtx)
++						peerClosed <- err
++					}
++				}))
++				defer relay.Close()
++				c, err := NewClient(key.NewNode(), relay.URL, func(string, ...any) {})
++				proxyMust(t, err)
++				c.ForceWebsockets = true
++				c.TLSConfig = relay.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
++				done := make(chan error, 1)
++				go func() { done <- c.Connect(ctx) }()
++				if phase != "upgrade" {
++					select {
++					case ws := <-opened:
++						defer ws.CloseNow()
++					case <-time.After(2 * time.Second):
++						t.Fatal("fixture failed to upgrade")
++					}
++				}
++				if phase == "client_close" {
++					_ = c.Close()
++				}
++				select {
++				case err := <-done:
++					if err == nil || strings.Contains(err.Error(), "fixture-secret") {
++						t.Error("failed greeting accepted or secret disclosed")
++					}
++					if phase != "invalid_greeting" && phase != "client_close" && !errors.Is(err, context.DeadlineExceeded) {
++						t.Error("greeting deadline identity lost")
++					}
++				case <-time.After(2 * time.Second):
++					t.Error("connection establishment was not bounded")
++				}
++				_ = c.Close()
++				select {
++				case err := <-peerClosed:
++					if errors.Is(err, context.DeadlineExceeded) {
++						t.Error("cancellation left upgraded socket open")
++					}
++				case <-time.After(time.Second):
++					t.Error("cancellation did not close upgrade socket")
++				}
++			}
++		})
++	}
++}
++
++func TestProxyWebsocketDERPFallback(t *testing.T) {
++	for _, name := range []string{"fallback", "forced", "initial_derp"} {
++		t.Run(name, func(t *testing.T) {
++			if isolatedProxyTest(t) {
++				return
++			}
++			forbidOriginDNS(t)
++			var logMu sync.Mutex
++			var logs bytes.Buffer
++			logf := func(format string, args ...any) {
++				logMu.Lock()
++				defer logMu.Unlock()
++				fmt.Fprintf(&logs, format, args...)
++			}
++			s := derp.NewServer(key.NewNode(), func(string, ...any) {})
++			defer s.Close()
++			relay := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if r.Header.Get("Proxy-Authorization") != "" || r.Header.Get("Coder-Session-Token") != "" || r.Header.Get("X-Fixture-Gateway") != "fixture-secret-gateway" {
++					t.Error("DERP credential separation failed")
++				}
++				if r.Header.Get("Upgrade") != "websocket" {
++					if name == "initial_derp" {
++						Handler(s).ServeHTTP(w, r)
++					} else {
++						w.WriteHeader(http.StatusForbidden)
++						_, _ = io.WriteString(w, "fixture-secret-denial-body")
++					}
++					return
++				}
++				ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"derp"}})
++				if err != nil {
++					return
++				}
++				defer ws.CloseNow()
++				nc := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
++				s.Accept(r.Context(), nc, bufio.NewReadWriter(bufio.NewReader(nc), bufio.NewWriter(nc)), r.RemoteAddr)
++			}))
++			defer relay.Close()
++			proxy, connects := connectProxy(t, relay.Listener.Addr().String(), http.StatusOK, nil)
++			t.Setenv("HTTPS_PROXY", proxy.URL)
++			region := &tailcfg.DERPRegion{RegionID: 1, RegionCode: "fixture", Nodes: []*tailcfg.DERPNode{{Name: "fixture", RegionID: 1, HostName: "example.com"}}}
++			clients := make([]*Client, 2)
++			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++			defer cancel()
++			for i := range clients {
++				c := NewRegionClient(key.NewNode(), logf, nil, func() *tailcfg.DERPRegion { return region })
++				clients[i] = c
++				defer c.Close()
++				c.TLSConfig = relay.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
++				c.Header = http.Header{"X-Fixture-Gateway": []string{"fixture-secret-gateway"}}
++				c.ForceWebsockets = name == "forced"
++				if name == "fallback" {
++					if err := c.Connect(ctx); err == nil {
++						t.Fatal("initial DERP denial was ignored")
++					}
++				}
++				proxyMust(t, c.Connect(ctx))
++				waitConnect(t, c)
++			}
++			cancel()
++			proxyMust(t, clients[0].Send(clients[1].privateKey.Public(), []byte("DERP fixture packet")))
++			m, err := clients[1].Recv()
++			proxyMust(t, err)
++			packet, ok := m.(derp.ReceivedPacket)
++			if !ok || string(packet.Data) != "DERP fixture packet" {
++				t.Fatal("real DERP packet exchange failed")
++			}
++			wantConnects := int32(2)
++			if name == "fallback" {
++				wantConnects = 4
++			}
++			if connects.Load() != wantConnects {
++				t.Fatal("unexpected relay route count")
++			}
++			logMu.Lock()
++			defer logMu.Unlock()
++			if strings.Contains(logs.String(), "fixture-secret") {
++				t.Fatal("DERP diagnostics disclosed a synthetic credential")
++			}
++		})
++	}
++}
+diff --git a/derp/derphttp/websocket_selection_internal_test.go b/derp/derphttp/websocket_selection_internal_test.go
+new file mode 100644
+index 000000000..32781886d
+--- /dev/null
++++ b/derp/derphttp/websocket_selection_internal_test.go
+@@ -0,0 +1,85 @@
++// Copyright (c) Tailscale Inc & AUTHORS
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build !js
++
++package derphttp
++
++import (
++	"context"
++	"crypto/tls"
++	"errors"
++	"net"
++	"net/http"
++	"net/url"
++	"testing"
++)
++
++func fixedProxyTransport(t *testing.T, ctx context.Context, target string, config *tls.Config, proxy string) *http.Transport {
++	t.Helper()
++	u, err := url.Parse(proxy)
++	proxyMust(t, err)
++	tr, err := websocketTransportWithProxy(ctx, target, config, func(*http.Request) (*url.URL, error) { return u, nil })
++	proxyMust(t, err)
++	tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
++		if address != u.Host {
++			t.Error("fixture attempted an unintended direct dial")
++			return nil, errors.New("direct fixture dial refused")
++		}
++		return (&net.Dialer{}).DialContext(ctx, network, address)
++	}
++	// In-process fixtures use only their synthetic URL credentials. The real
++	// environment auth path remains covered in isolated TLS fixtures.
++	tr.GetProxyConnectHeader = proxyConnectHeaders(func(proxy *url.URL) (string, error) {
++		if proxy.User == nil {
++			return "", nil
++		}
++		password, _ := proxy.User.Password()
++		request := &http.Request{Header: make(http.Header)}
++		request.SetBasicAuth(proxy.User.Username(), password)
++		return request.Header.Get("Authorization"), nil
++	})
++	return tr
++}
++
++func TestProxyWebsocketSelection(t *testing.T) {
++	t.Parallel()
++	for _, tc := range []struct {
++		name, target, scheme, proxy string
++		err                         error
++		wantError                   bool
++	}{
++		{name: "secure", target: "wss://relay.test/derp", scheme: "https", proxy: "http://proxy.test:8080"},
++		{name: "plain", target: "ws://relay.test/derp", scheme: "http", proxy: "http://proxy.test:8080"},
++		{name: "direct", target: "https://relay.test/derp", scheme: "https"},
++		{name: "selection_error", target: "wss://relay.test/derp", scheme: "https", err: errors.New("fixture-secret"), wantError: true},
++		{name: "unsupported", target: "wss://relay.test/derp", scheme: "https", proxy: "socks5://proxy.test:1080", wantError: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Parallel()
++			ctx := context.Background()
++			tr, err := websocketTransportWithProxy(ctx, tc.target, nil, func(request *http.Request) (*url.URL, error) {
++				if request.URL.Scheme != tc.scheme || request.Context() != ctx {
++					t.Error("selector lost normalized scheme or request context")
++				}
++				if tc.err != nil || tc.proxy == "" {
++					return nil, tc.err
++				}
++				return url.Parse(tc.proxy)
++			})
++			if tc.wantError {
++				if err == nil {
++					t.Fatal("selector error was ignored")
++				}
++				return
++			}
++			proxyMust(t, err)
++			defer tr.CloseIdleConnections()
++			selected, err := tr.Proxy(&http.Request{})
++			proxyMust(t, err)
++			if (selected == nil) != (tc.proxy == "") || selected != nil && selected.String() != tc.proxy {
++				t.Fatal("transport changed selected route")
++			}
++		})
++	}
++}
+diff --git a/net/tshttpproxy/proxy_environment_internal_test.go b/net/tshttpproxy/proxy_environment_internal_test.go
+new file mode 100644
+index 000000000..07b33d795
+--- /dev/null
++++ b/net/tshttpproxy/proxy_environment_internal_test.go
+@@ -0,0 +1,38 @@
++// Copyright (c) Tailscale Inc & AUTHORS
++// SPDX-License-Identifier: BSD-3-Clause
++
++package tshttpproxy
++
++import (
++	"errors"
++	"strings"
++	"testing"
++)
++
++func TestProxyEnvironmentConflicts(t *testing.T) {
++	t.Parallel()
++	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"} {
++		for _, variant := range []string{"upper", "lower", "equal", "different", "empty"} {
++			t.Run(name+"/"+variant, func(t *testing.T) {
++				t.Parallel()
++				values := map[string]string{}
++				if variant == "upper" || variant == "equal" || variant == "different" {
++					values[name] = "fixture-secret-upper"
++				}
++				if variant == "lower" || variant == "equal" || variant == "different" {
++					values[strings.ToLower(name)] = "fixture-secret-upper"
++				}
++				if variant == "different" {
++					values[strings.ToLower(name)] = "fixture-secret-lower"
++				}
++				err := checkProxyEnvironment(func(key string) string { return values[key] })
++				if (variant == "different") != errors.Is(err, ErrConflictingProxyEnvironment) {
++					t.Fatal("unexpected conflict decision")
++				}
++				if err != nil && strings.Contains(err.Error(), "fixture-secret") {
++					t.Fatal("proxy setting value disclosed")
++				}
++			})
++		}
++	}
++}
+diff --git a/net/tshttpproxy/tshttpproxy.go b/net/tshttpproxy/tshttpproxy.go
+index 24b0050e9..a70442545 100644
+--- a/net/tshttpproxy/tshttpproxy.go
++++ b/net/tshttpproxy/tshttpproxy.go
+@@ -7,6 +7,7 @@
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"log"
+ 	"net"
+@@ -117,10 +118,33 @@ func SetSelfProxy(addrs ...string) {
+ // For example, WPAD PAC files on Windows.
+ var sysProxyFromEnv func(*http.Request) (*url.URL, error)
+ 
++// ErrConflictingProxyEnvironment reports ambiguous case variants without values.
++var ErrConflictingProxyEnvironment = errors.New("conflicting proxy environment")
++
++// CheckProxyEnvironment rejects different nonempty upper/lowercase proxy values.
++// This conservative policy prevents API and DERP selectors choosing different
++// routes. Equal values and configurations with only one variant are unchanged.
++func CheckProxyEnvironment() error {
++	return checkProxyEnvironment(os.Getenv)
++}
++
++func checkProxyEnvironment(getenv func(string) string) error {
++	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"} {
++		upper, lower := getenv(name), getenv(strings.ToLower(name))
++		if upper != "" && lower != "" && upper != lower {
++			return ErrConflictingProxyEnvironment
++		}
++	}
++	return nil
++}
++
+ // ProxyFromEnvironment is like the standard library's http.ProxyFromEnvironment
+ // but additionally does OS-specific proxy lookups if the environment variables
+ // alone don't specify a proxy.
+ func ProxyFromEnvironment(req *http.Request) (*url.URL, error) {
++	if err := CheckProxyEnvironment(); err != nil {
++		return nil, err
++	}
+ 	localProxyFunc := getProxyFunc()
+ 	u, err := localProxyFunc(req.URL)
+ 	if u != nil && err == nil {

@@ -1,0 +1,38 @@
+name: Verify proxy CLI
+on:
+  pull_request:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.14.4'
+      - name: Verify packaging safeguards
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Reproduce both unpatched failures
+        run: python3 scripts/pipeline.py baseline --assembly baseline
+      - name: Test and build the locked patch
+        run: python3 scripts/pipeline.py all
+      - name: Rebuild from a second source directory
+        run: |
+          python3 scripts/pipeline.py assemble --assembly rebuild
+          python3 scripts/pipeline.py build --assembly rebuild --dist dist-rebuild
+          python3 scripts/pipeline.py image --assembly rebuild --dist dist-rebuild
+          cmp ../.build/dist/coder ../.build/dist-rebuild/coder
+          cmp ../.build/dist/coder-cli.oci.tar ../.build/dist-rebuild/coder-cli.oci.tar
+          cmp ../.build/dist/sources.tar.gz ../.build/dist-rebuild/sources.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: coder-proxy-linux-amd64
+          path: ../.build/dist/
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,84 @@
+name: Verify patched proxy CLI
+
+on:
+  push:
+    branches: ["main"]
+    paths: ["proxy-patch/**", ".github/workflows/proxy-patch-publish.yml", ".github/workflows/proxy-patch-verify.yml", ".gitignore"]
+  pull_request:
+    paths: ["proxy-patch/**", ".github/workflows/proxy-patch-publish.yml", ".github/workflows/proxy-patch-verify.yml", ".gitignore"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: proxy-patch-verify-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    if: github.server_url == 'https://github.com' && github.repository == 'treyturner/coder'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        working-directory: proxy-patch
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check GitHub fork workflow policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/configure_workflows.py
+      - name: Choose temporary build directory
+        run: printf 'PATCH_WORK=%s/coder-proxy-patch\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.14.4'
+      - name: Select frozen packaging runtime
+        run: python3 scripts/ci_packager.py --work "$PATCH_WORK"
+      - name: Verify packaging safeguards
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Reproduce the original defect
+        run: python3 scripts/pipeline.py baseline --work "$PATCH_WORK" --assembly baseline
+      - name: Qualify pinned source and build the image
+        run: python3 scripts/pipeline.py all --work "$PATCH_WORK" --assembly qualified
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: coder-proxy-linux-amd64
+          path: ${{ env.PATCH_WORK }}/dist/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Compare hosted image with reviewed release identities
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          with open("publication.json") as source:
+              release = json.load(source)
+          subprocess.run([
+              sys.executable, "scripts/publish.py", "verify", "--work", os.environ["PATCH_WORK"],
+              "--approved-index", release["registry_index_digest"],
+              "--approved-manifest", release["platform_manifest_digest"],
+          ], check=True)
+          PY
+      - name: Verify registry publication behavior using local TLS fixtures
+        run: python3 scripts/publish.py test --work "$PATCH_WORK"
+      - name: Rebuild from a separate source directory
+        run: |
+          python3 scripts/pipeline.py assemble --work "$PATCH_WORK" --assembly rebuild
+          python3 scripts/pipeline.py build --work "$PATCH_WORK" --assembly rebuild --dist dist-rebuild
+          python3 scripts/pipeline.py image --work "$PATCH_WORK" --assembly rebuild --dist dist-rebuild
+          cmp "$PATCH_WORK/dist/coder" "$PATCH_WORK/dist-rebuild/coder"
+          cmp "$PATCH_WORK/dist/coder-cli.oci.tar" "$PATCH_WORK/dist-rebuild/coder-cli.oci.tar"
+          cmp "$PATCH_WORK/dist/sources.tar.gz" "$PATCH_WORK/dist-rebuild/sources.tar.gz"
+      - name: Retain sanitized verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: proxy-verification-evidence
+          path: ${{ env.PATCH_WORK }}/evidence/*.json
+          if-no-files-found: ignore
+          retention-days: 14
