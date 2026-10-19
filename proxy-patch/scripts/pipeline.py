@@ -6,6 +6,7 @@ import datetime
 import gzip
 import hashlib
 import io
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -109,9 +110,9 @@ def run(args, cwd=None, env=None, capture=False, expected=0):
     return result.stdout if capture else b""
 
 
-def download(url, expected=None):
+def download(url, expected=None, accept=None):
     try:
-        req = urllib.request.Request(url, headers={"Accept": ", ".join([
+        req = urllib.request.Request(url, headers={"Accept": accept or ", ".join([
             OCI + "manifest.v1+json", OCI + "index.v1+json",
             "application/vnd.docker.distribution.manifest.v2+json",
         ])})
@@ -119,7 +120,7 @@ def download(url, expected=None):
             data = response.read()
     except (urllib.error.URLError, OSError):
         # URLs can contain registry-issued signed query parameters.
-        raise RuntimeError("public artifact download failed") from None
+        raise PipelineError("public artifact download failed") from None
     if expected:
         check(digest(data) == expected.removeprefix("sha256:"), "download checksum mismatch")
     return data
@@ -678,10 +679,12 @@ def verify_checksums(output):
 def main():
     global EVIDENCE_DIRECTORY
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["refresh", "bootstrap", "assemble", "baseline", "rollback", "lint", "test", "race", "build", "image", "interop", "verify", "all"])
+    parser.add_argument("command", choices=["bump", "refresh", "bootstrap", "assemble", "baseline", "rollback", "lint", "test", "race", "build", "image", "interop", "verify", "all"])
     parser.add_argument("--work", type=Path, default=ROOT.parent / ".build")
     parser.add_argument("--assembly", default="assembly")
     parser.add_argument("--dist", default="dist", help="fresh output directory name below --work")
+    parser.add_argument("--coder-tag", help="official Coder tag for a draft future source lock")
+    parser.add_argument("--draft-lock", type=Path, default=ROOT / "sources.next.json")
     parser.add_argument("--source-root", type=Path, default=ROOT.parent, help="reviewed source checkouts for refresh")
     args = parser.parse_args()
     work = args.work.resolve()
@@ -691,7 +694,15 @@ def main():
     parent = work / args.assembly
     output = work / args.dist
     command = args.command
-    if command == "refresh":
+    if command == "bump":
+        spec = importlib.util.spec_from_file_location("bump", ROOT / "scripts/bump.py")
+        bump = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bump)
+        try:
+            bump.draft(args.coder_tag, work, args.draft_lock)
+        except (bump.BumpError, bump.pipeline.PipelineError) as error:
+            raise PipelineError(str(error)) from None
+    elif command == "refresh":
         refresh_patches(args.source_root.resolve())
     elif command == "bootstrap":
         bootstrap(work)

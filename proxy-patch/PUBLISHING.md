@@ -2,7 +2,7 @@
 
 This fork stores the repeatable patch queue under `proxy-patch/`. The branch is based on the fork's main branch so its review contains the build integration without rolling upstream source back to v2.37.4. The pipeline assembles the exact v2.37.4 Coder and Tailscale commits recorded in `sources.lock.json`; the ordinary repository root is not the patched CLI source.
 
-Run commands from `proxy-patch/`, following [README.md](README.md) and the [reviewed plan](docs/PLAN.md). The archived BUILD.md, source lock, source patches, build scripts, fixtures, packaging configuration and licenses form the build recipe. Editorial README changes, the historical research plan and inactive nested workflow are outside build identity. The active fork workflows are `.github/workflows/proxy-patch-verify.yml` and `.github/workflows/proxy-patch-publish.yml` at the repository root. The nested `.github/workflows/verify.yml` is historical reference data. The preserved report records local qualification before fork integration; subsequent publication status comes from actual run receipts.
+Run commands from `proxy-patch/`, following [README.md](README.md) and the [reviewed plan](docs/PLAN.md). The archived BUILD.md, source lock, source patches, build scripts, fixtures, packaging configuration and licenses form the build recipe. Editorial README changes, the historical research plan and inactive nested workflow are outside build identity. The active fork workflows are `.github/workflows/proxy-patch-verify.yml` and `.github/workflows/proxy-patch-publish.yml` at the repository root. The nested `.github/workflows/verify.yml` is historical reference data. REPORT.md records the current review candidate; REPORT.initial.md preserves the earlier local qualification. Publication status comes from actual run receipts.
 
 The GitHub repository is `treyturner/coder`. Its Forgejo pull mirror carries source and workflow files. Both active workflows check the GitHub server origin and repository; publication also requires `main`. The source-run checker rejects mirror origins before using a token. Registry images require separate copies to both destinations.
 
@@ -17,18 +17,18 @@ The requested external naming convention is `treyturner/coder:<upstream_version>
 - `ghcr.io/treyturner/coder:2.37.4-proxyfix-1`
 - `forgejo.treyturner.info/treyturner/coder:2.37.4-proxyfix-1`
 
-The binary version remains `2.37.4+proxyfix.1.1d24629`. The OCI layout's internal reference remains `2.37.4-proxyfix.1`. Only the external registry tag changes punctuation; no image bytes are changed.
+The binary version remains `2.37.4+proxyfix.1.1d24629`. The OCI layout's internal reference remains `2.37.4-proxyfix.1`. External registry tags use the requested punctuation; the OCI reference and binary version follow the locked patch revision.
 
 `publication.json` records both repositories, the derived tag, the qualified CLI checksum, and the independently reviewed identities:
 
 ```text
-Registry index: sha256:dc6e6ed42ec8e5ff0a4bf72da5a43a87a66528cd60a1c554173d2ef7225f2759
-Linux amd64:   sha256:51be698a535461b8d1d5b19c88c5fb20c99691862e46b68e0fa6283bed1cd107
+Registry index: sha256:255abe17668b0c568f6e42ea4430dd29828fa414a3a08ab36751e8ba397a99bc
+Linux amd64:   sha256:6b9c4771ec6d7c7e57d1f40829ff274bbf601fe582cea0be6c2c419afe07dfba
 ```
 
 ## Verify before publishing
 
-Open or update a pull request to run **Verify patched proxy CLI**. Merged changes run verification again on `main`. Superseded PR runs are cancelled; main and manually dispatched runs have unique concurrency groups and remain eligible to complete. It exercises the original defect, runs the full patch qualification pipeline and local registry regressions, rebuilds from separate source, and uploads `coder-proxy-linux-amd64`. That artifact contains the image, source, complete frozen build recipe, licenses, inventory, provenance and checksums. Hosted verification artifacts expire after 14 days; approved publication retains their exact 12 top-level payload files as durable GitHub Release assets before registry writes.
+Open or update a pull request to run **Verify patched proxy CLI**. Merged changes run verification again on `main`. Superseded PR runs are cancelled; main and manually dispatched runs have unique concurrency groups and remain eligible to complete. It exercises the original defect, runs the full patch qualification pipeline and local registry regressions, rebuilds from separate source, and uploads `coder-proxy-linux-amd64`. That artifact contains the image, source, complete frozen build recipe, licenses, inventory, provenance and checksums. The artifact is uploaded before the reviewed-digest comparison so a new candidate remains reviewable when that comparison fails. Publication still requires the complete workflow to succeed. Hosted verification artifacts expire after 14 days; approved publication retains their exact 12 top-level payload files as durable GitHub Release assets before registry writes.
 
 The main branch must contain the workflow before **Publish approved proxy CLI** is available for manual dispatch. Review and merge the fork integration separately; this task does not merge it automatically. Hosted execution and registry publication remain unverified until their actual runs complete.
 

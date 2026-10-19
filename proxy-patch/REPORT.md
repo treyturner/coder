@@ -1,78 +1,43 @@
-# v2.37.4 proxy patch implementation result
+# v2.37.4 proxy patch review qualification
 
-Implementation and local artifact qualification completed on October 18, 2026. **Independent review: PASS for local implementation and artifact readiness, with no remaining blockers in that scope.** The images are unpublished candidates. Subsequent Docker execution checks pass, and the user confirms that the fixed CLI build works.
+The October 19, 2026 review candidate passes local source qualification, race checks, reproducibility checks and offline Docker execution. Independent source/control and artifact review passes. This report supersedes [the initial candidate report](REPORT.initial.md); the earlier user confirmation applies to that initial CLI.
 
-The CLI version is `2.37.4+proxyfix.1.1d24629`, built from Coder v2.37.4 to match the server version the user reports running. The build retains the exact pinned Tailscale fork and the consuming WebSocket v1.8.14 / x/net v0.58.0 graph. It uses a local module replacement; no dependency upgrade or global module-cache modification is part of the patch.
+The version remains `2.37.4+proxyfix.1.1d24629`, based on official Coder v2.37.4 and its exact pinned Tailscale fork. The source changes add proxy routing for WebSocket fallback, retain verified relay/proxy TLS and hop-specific authentication, bound connection establishment and cleanup, and provide safe stage/status/cause diagnostics. Conflicting nonempty uppercase/lowercase HTTP_PROXY, HTTPS_PROXY or NO_PROXY pairs stop before CLI networking and both DERP connection paths; values are never printed. Tests inject proxy selection where possible and retain isolated real-environment integration cases.
 
-## Implemented changes
-
-| File | Result |
-| --- | --- |
-| Tailscale `derp/derphttp/websocket.go` | WebSocket fallback selects the configured proxy, fails closed on selection/authentication errors, supplies silent CONNECT authentication, separates HTTPS-proxy TLS from relay TLS, refuses redirects, sanitizes remote diagnostics, and closes upgraded streams without waiting for an unresponsive close handshake. |
-| Tailscale `derp/derphttp/derphttp_client.go` | Post-101 DERP establishment obeys cancellation and the existing ten-second connection cap. Failed streams and CONNECT sockets close correctly; cancellation guards stop and join before successful handoff. Denial diagnostics retain stage/status without response bodies, credentials or authenticated URLs. |
-| Tailscale `derp/derphttp/websocket_proxy_test.go` | Isolated local proxy, TLS, denial, authentication, lifetime, policy-selection, direct-dial prevention and real DERP regression fixtures. |
-| Coder `go.mod` | Replaces the existing fork replacement with the assembled `../tailscale` checkout. `go.sum` is unchanged. |
-| Coder `codersdk/workspacesdk/proxy_integration_test.go` | Local API/coordinator → proxied DERP fallback → WireGuard → SSH integration; the SSH command returns the synthetic identity `fixture-user`. API/session, proxy and gateway credentials stay on their intended hops. |
-| Coder `cli/ssh_proxy_test.go` | An actual CLI invocation with disabled autostart rejects a stopped workspace and issues no mutation requests. |
-| Coder `tailnet/conn_test.go` | Updates the existing forced-WebSocket assertion to require the status-only diagnostic, consistent with removing the remote denial body. |
-| Patch-control repository | Pinned source/patch locks, source assembly, baseline, regression/race/lint/build checks, reproducible CLI/OCI/source/recipe artifacts, independent OCI-consumer roundtrip, CI recipe, rollback preparation and future-update instructions. |
-
-URL-based default CONNECT changes remain outside this queue. The initial DERP 403's origin remains unverified; this patch fixes the WebSocket proxy omission and connection handling, and preserves existing fallback eligibility. It does not establish that a denied deployment route is permitted.
+Review fixes also simplify formatter input and CI, disable inherited automation through repository settings, make matching release retries depend on payload identity, avoid anonymous API downloads and publication-time recompression, isolate the registry publisher, and derive future source-lock drafts from official tags. Each of the 14 review comments has its own commit. The source-lock and patch checksums agree at every commit.
 
 ## Executed verification
 
 | Check | Result |
 | --- | --- |
-| Unpatched exact-pin baseline under Coder v2.37.4 graph | Reproduced both missing proxy routing and ignored post-upgrade DERP cancellation. A ping milestone makes the latter deterministic. |
-| `go test tailscale.com/derp/... ./codersdk/workspacesdk` | PASS, full suites. |
-| `go test ./tailnet/...` | PASS, full suites with repository-default skip behavior. |
-| CLI disabled-autostart fixture | PASS, stopped workspace rejected without start/build calls. |
-| `-race -run '^TestProxy'` for DERP/SDK and targeted CLI fixture | PASS. |
-| Go vet and `go mod verify` | PASS for affected packages and the consuming graph. |
-| Repository Go formatting and affected-package golangci-lint v2.0.2 | PASS, with no automatic fixes or suppressed diagnostics beyond the justified self-exec test annotation. |
-| Offline packaging regressions | 14 PASS, including stale payload/lock binding, effective replacements, reproducible archives, descriptor/blob/archive/checksum tampering, distinct catalog/index identity, reference/tag/platform tampering and environment isolation. |
-| Independent Go OCI consumer | Both artifacts PASS go-containerregistry v0.20.7 recursive validation and local OCI-to-OCI copy with registry-index and platform digests preserved. |
-| Separate source-directory rebuild | All 12 top-level deliverables match byte for byte, including binary, OCI/source/recipe archives, provenance, inventory and checksums. Same Linux amd64 host and locked Go/Python/zlib. |
-| Artifact audit | Static ELF64 amd64, CGO disabled, upstream slim/omit tags, expected version and replacement metadata. UID/GID 65532, CLI/help defaults, explicit home with mode 0700, and 150 parsed runtime CA roots. Host CLI help with the image's public environment resolves the intended config path. |
-| Docker execution smoke check | PASS on daemon 29.8.2 / client 29.8.0. Loaded the exact frozen OCI archive and ran `version`, the default help command, and `ssh --help`; all exited zero with expected output. Docker's imported index identity, selected platform manifest, configuration and uncompressed layers match the frozen layout. Each container used UID/GID 65532, no networking, a read-only root filesystem, dropped capabilities, no new privileges and only a temporary `/tmp`; no host configuration or credential mounts were supplied. Test containers were removed. |
-| User confirmation | On October 18, 2026, the user reported: “the fixed cli build works.” The tested command, stdout, agent version and runtime conditions were not supplied with this confirmation. |
-| Secret handling | No local synthetic credential markers in the CLI or artifact metadata. Source archive restricted to 13,583 pinned tracked entries; recipe restricted to 12 reviewed files. Runtime config, home directories, environment dumps and protected bindings are excluded. Public upstream test fixtures remain part of corresponding source. |
+| Exact unpatched v2.37.4 baseline | Reproduced proxy omission and ignored cancellation after upgrade. |
+| Full DERP, tshttpproxy and SDK suites | PASS, including local coordinator, proxied DERP, WireGuard and SSH fixture output. |
+| CLI and tailnet | PASS, including stopped-workspace autostart prevention and conflicting proxy environment guard. CLI qualification runs once per candidate. |
+| Race checks | PASS for patch regressions in DERP, tshttpproxy and SDK. |
+| Static checks | PASS for repository formatting, affected-package golangci-lint v2.0.2, Go vet and module verification. |
+| Build/publication control | 51 Python checks PASS; active-workflow actionlint PASS. |
+| Standalone publisher | 12 TLS/registry/race cases PASS; HTTPS-only destination flags and stale-source isolation covered. |
+| Release retention | All 12 actual candidate payload files pass offline interrupted-upload, cross-commit resume and completed-retry fixtures. |
+| Future bump | Official v2.37.4 metadata reproduces every derived lock field; patch hashes/trees remain unset for manual rebasing and review. |
+| Separate source rebuild | All 12 top-level files match byte for byte from separate source directories, with the same Linux amd64 host and locked toolchain/packager. |
+| OCI interoperability | Independent Go consumer validates and round-trips both copies without changing registry index or platform digests. |
+| Offline Docker execution | Version, default help and SSH help pass using the exact OCI archive, UID/GID 65532, no networking, read-only filesystem, dropped capabilities and no host/config/credential mounts. Client 29.9.1; daemon 29.8.2. |
+| GitHub workflow settings | Verified through the existing authenticated CLI: inherited workflows disabled; registered patch workflows enabled. |
 
-Safe execution records are in `../.build/evidence/`. The current source-lock SHA256 is `701cc22a47821f270d86c9410d12deddea100adaae4bb55b7b13f7d662ebeecf`.
+The complete local qualification used `review-qualified-v3` and `review-rebuild`, with payloads under the task build directory's `review-dist/` and `review-dist-rebuild/`. Safe records are under `evidence/`, including `review-reproduction.json`, `review-container-smoke.json`, `review-companion-payload.json` and `review-bump.json`. Hosted qualification is tracked on PR #1 and must pass for its final head; previous hosted runs describe the initial candidate.
 
-The subsequent Docker check is recorded in `../.build/evidence/container-smoke.json`; its rerunnable local driver is `../.build/container-smoke.py` (run with `/usr/bin/python3` after importing the frozen archive). The check used the inherited `DOCKER_HOST` endpoint. The earlier inference that an absent local socket meant no daemon was available was incorrect. These offline CLI checks do not exercise live proxy, DERP or SSH connectivity. The frozen payloads and their checksums are unchanged.
+## Current candidate identities
 
-## Frozen artifacts
-
-Primary deliverables are in `../.build/dist/`; the matching rebuild is in `../.build/dist-rebuild/`.
-
-| Identity | Digest |
+| Identity | SHA256 |
 | --- | --- |
-| **Registry image index** | `sha256:dc6e6ed42ec8e5ff0a4bf72da5a43a87a66528cd60a1c554173d2ef7225f2759` |
-| Linux amd64 platform manifest | `sha256:51be698a535461b8d1d5b19c88c5fb20c99691862e46b68e0fa6283bed1cd107` |
-| Layout catalog SHA256, distinct from registry identity | `9f8150d1294f72d796413b231791a3d710449e401885064ddcf4f5e9f333c996` |
-| `coder-cli.oci.tar` SHA256 | `54cf8f7901745fac2532c76e61abe5cb1dd9ecc381a0ded890b82ccbe7a94e73` |
-| CLI SHA256 | `491b6f355a2e54f7fbfdd24dffcf7b7b26e2e7d637086e690597cde82708ff6c` |
-| Corresponding source SHA256 | `942dde945ce79b6b74681dbdaf9dfb529e4e5a530601e63026ab93c2d1d8d28e` |
-| Complete build/patch recipe SHA256 | `261e8df4054a27274ebb023f716b9b53d4ba88038c5783ebe4034ab101425a82` |
+| Registry image index | `sha256:255abe17668b0c568f6e42ea4430dd29828fa414a3a08ab36751e8ba397a99bc` |
+| Linux amd64 manifest | `sha256:6b9c4771ec6d7c7e57d1f40829ff274bbf601fe582cea0be6c2c419afe07dfba` |
+| CLI | `31950ade2a62c18c60c226c7e00a378fd2adf421c4d0b44f60cfee248240cb6b` |
+| OCI archive | `453db195d22112ef6c82910146cead255f369aa5dc523dac4ae5b4ffe134e599` |
+| Corresponding source archive | `96e582dba83be9ec881ac37206a3180f8d446ce2528fe0ec9be3fe6ec46b4da4` |
+| Frozen build recipe | `cd3916af61a3d86569679930a8ffb463c1a50d0f01e750da610af45f7b7d850e` |
+| Source lock | `010750cb3a8f43e06a88ad0200605364d60b24e13cd3c28c06094ac54cf361ed` |
 
-The OCI archive is 21,217,280 bytes; the static CLI is 59,203,746 bytes. `SHA256SUMS` covers all top-level payload files. The CycloneDX inventory describes 219 effective linked Go modules and their replacements; it is not a runtime-base inventory or vulnerability assessment.
+Coder's patched tree is `15464ec1d1f034aa801384b5d2d31b749c113aef`; Tailscale's is `35fa9cea31cb77ed187130dc8e584152f779b15e`. The independent reviewer reconstructed both source trees from all 13,587 source-archive entries and verified the 13-file recipe, provenance, 219-component inventory, binary metadata and OCI descriptors/layers. `SHA256SUMS` covers all 12 top-level deliverables. The exact source commits, patch hashes, selected dependencies, Go/toolchain checksums and runtime image are pinned in `sources.lock.json`. No global module cache is modified.
 
-Coder's final Git tree is `b8b6be8406b9ec5cb69063dde89a7f868bb97dee`; Tailscale's is `8c48de18af867c6b5c0c8c2fc499d1e529184525`. Base commits, original replacement pseudo-version, patch hashes, toolchain checksum and runtime digests are in `sources.lock.json`. Source changes are staged locally; no source commit, PR or remote publication was created.
-
-## Independent review
-
-The independent reviewer performed read-only checks of all 12 matching artifacts, checksums, provenance/lock/recipe bindings, recursively referenced OCI objects, compressed/uncompressed layers and archive agreement. They reconstructed both exact Git trees from the source archive, checked all 219 effective inventory entries against the binary's build metadata, inspected static ELF/build flags and runtime CA/home configuration, and verified the retained official rollback archive corresponds to its extracted binary. All supplied digests matched. The reviewer did not run tests, builds, network operations or containers.
-
-The reviewer approved **local implementation/artifact readiness only**. This verdict does not establish hosted CI, full monorepo hook completion, container execution, live SSH or publication.
-
-## Remaining gates and rollback
-
-- Full monorepo pre-commit was attempted in scratch source. It could not complete because pnpm, shfmt and Terraform were unavailable. Targeted Go formatting/lint, vet and affected suites passed. Hooks remain configured; no commit bypass was used.
-- Container CLI execution now passes the offline smoke check above. Hosted CI has not run.
-- The user's successful CLI result is recorded above. Agent-performed live acceptance requires the separate approval defined in the reviewed plan, fresh readiness checks, the actual existing agent version and matching fixture coverage if different, the approved relay authority/proxy/CA/protected-auth mechanism, and actual harmless identity output. The current deployment's 403 origin and policy applicability remain unresolved. No agent-initiated live workspace access was attempted.
-- Publication requires separate approval of the exact registry index and both destination namespaces/references. Nothing has been pushed to `ghcr.io` or `forgejo.treyturner.info`. Preserve the registry index and platform bytes at both destinations; the layout catalog checksum is not the publication digest.
-
-The official [v2.37.4 release](https://github.com/coder/coder/releases/tag/v2.37.4) Linux amd64 archive and extracted CLI are retained under `../.build/rollback/`, without installation. The locked archive SHA256 and publisher checksum agree; the CLI's version was verified with an empty config. Extracted official CLI SHA256: `29cf7d11333cab252ee9f849d52f31d6e92c78100eb6200314660637d6a95d7a`. No release-signature verification is claimed. Rollback restores the recorded official CLI/client image reference and protected config; it does not promise to remove the official client's proxy defect.
-
-Rebuild/update commands, the regression matrix and approval/stop conditions are documented in [README.md](README.md) and the preserved [approved plan](docs/PLAN.md).
+The candidate is unpublished. Merge and publication retain the existing separate gates; publication requires successful verification of the current main commit, matching reviewed digests, durable release assets and digest readback at both configured registries. The current server's initial DERP 403 origin remains unverified. No live workspace test or server/network change was performed for these review revisions. The retained, checksummed official v2.37.4 CLI provides the documented rollback; it is not installed automatically.
